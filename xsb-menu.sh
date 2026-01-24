@@ -335,9 +335,32 @@ json_del_inbound_sb_by_tag(){
 
 # --------- Public IP ----------
 get_public_ip_best_effort(){
+  # 1) 如果用户手动指定了 PUBLIC_HOST，则永远用它（域名/公网IP都行）
+  if [[ -n "${PUBLIC_HOST:-}" ]]; then
+    echo "$PUBLIC_HOST"
+    return 0
+  fi
+
+  # 2) 优先从公网服务获取 IPv4（最准确）
   local ip=""
-  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
-  if [[ -z "$ip" ]]; then ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"; fi
+  ip="$(curl -fsS4m 2 https://api.ipify.org 2>/dev/null || true)"
+  [[ -n "$ip" ]] || ip="$(curl -fsS4m 2 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\n' || true)"
+  [[ -n "$ip" ]] || ip="$(curl -fsS4m 2 https://ifconfig.me/ip 2>/dev/null | tr -d '\n' || true)"
+  if [[ -n "$ip" ]]; then
+    echo "$ip"
+    return 0
+  fi
+
+  # 3) 拿不到 IPv4 再拿 IPv6（纯 v6 机器会用到）
+  ip="$(curl -fsS6m 2 https://api64.ipify.org 2>/dev/null || true)"
+  [[ -n "$ip" ]] || ip="$(curl -fsS6m 2 https://ipv6.icanhazip.com 2>/dev/null | tr -d '\n' || true)"
+  if [[ -n "$ip" ]]; then
+    echo "$ip"
+    return 0
+  fi
+
+  # 4) 最后兜底：本机IP（可能是内网）
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   echo "${ip:-YOUR_SERVER_IP}"
 }
 
