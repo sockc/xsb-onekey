@@ -580,7 +580,7 @@ PY
     set -e
     return 1
   fi
-
+local tag="xray-${name// /_}-reality-${port}"
 
   # ✅ 先备份配置，后写入（失败可回滚）
   local bak="/etc/xray/config.json.bak.$(date +%F-%H%M%S)"
