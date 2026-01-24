@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 # =========================================================
-# XSB OneKey Manager (Xray + sing-box)
-# 标准目录版：/usr/local/bin, /etc, /var/lib
-# 协议池：
+# XSB OneKey Manager (Xray + sing-box) - Full Fix Pack
+# Protocols:
 #   - VLESS + Reality (Xray)
 #   - VMess + WS (noTLS) (Xray)
 #   - VMess + TCP + HTTP (Xray)
 #   - TUIC (sing-box)
 #   - Hysteria2 (sing-box)
 #
-# 修复内容：
-#   - 修复 jq 兼容性问题：不再在 jq 内用复杂三元表达式 + 对象字面量
-#     改为先生成 headers JSON，再 --argjson 注入（兼容各种 jq 版本）
-#   - VERSION 字段用于 install.sh 显示版本
+# Fixes in v1.0.2:
+#   1) jq 兼容性：不再使用三元+对象字面量导致 compile error
+#   2) Reality privateKey 为空导致 xray 崩溃：改为稳健解析 + 空值校验
+#   3) Reality dest 改成 SNI:443
+#   4) HY2 输出标准 hysteria2:// 链接 + QR
+#   5) TUIC 输出 sing-box JSON(必可用) + tuic:// 分享链接(部分客户端可用)
 # =========================================================
 
 set -euo pipefail
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 
-# --------- 基本路径（标准目录） ----------
+# --------- Paths ----------
 XRAY_BIN="/usr/local/bin/xray"
 SB_BIN="/usr/local/bin/sing-box"
 XRAY_CFG="/etc/xray/config.json"
@@ -60,7 +61,7 @@ PY
   fi
 }
 
-# --------- 系统识别 ----------
+# --------- OS/ARCH ----------
 OS_FAMILY=""
 PKG=""
 detect_os(){
@@ -78,10 +79,6 @@ detect_os(){
       OS_FAMILY="unknown"
     fi
   fi
-
-  if [[ "$OS_FAMILY" == "unknown" ]]; then
-    warn "未识别系统，继续尝试运行（可能需要你手动装依赖）"
-  fi
 }
 
 ARCH=""
@@ -92,37 +89,32 @@ detect_arch(){
     x86_64|amd64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
     armv7l|armv7) ARCH="armv7" ;;
-    *)
-      ARCH="$m"
-      warn "未识别架构：$m，可能无法自动下载预编译二进制"
-      ;;
+    *) ARCH="$m"; warn "未识别架构：$m" ;;
   esac
 }
 
-# --------- 依赖 ----------
+# --------- Deps ----------
 install_deps(){
   detect_os
-  local common=(curl jq openssl tar)
+  local common=(curl jq openssl tar unzip)
   if [[ "$PKG" == "apt" ]]; then
     apt-get update -y
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${common[@]}" ca-certificates coreutils
     apt-get install -y uuid-runtime >/dev/null 2>&1 || true
     apt-get install -y qrencode >/dev/null 2>&1 || true
     apt-get install -y netcat-openbsd >/dev/null 2>&1 || true
-    apt-get install -y unzip >/dev/null 2>&1 || true
   elif [[ "$PKG" == "yum" || "$PKG" == "dnf" ]]; then
     $PKG install -y "${common[@]}" ca-certificates coreutils
     $PKG install -y util-linux >/dev/null 2>&1 || true
     $PKG install -y qrencode >/dev/null 2>&1 || true
     $PKG install -y nc >/dev/null 2>&1 || true
-    $PKG install -y unzip >/dev/null 2>&1 || true
   else
-    warn "跳过自动安装依赖（未知系统）。请确保存在：curl jq openssl tar unzip"
+    warn "未知系统，跳过自动装依赖。请确保存在：curl jq openssl tar unzip"
   fi
   ok "依赖检查完成"
 }
 
-# --------- GitHub Release 下载 ----------
+# --------- GitHub Release helper ----------
 gh_latest_asset_url(){
   local repo="$1"
   local key="$2"
@@ -139,7 +131,7 @@ download_and_install_xray(){
     amd64) key="linux-64.zip" ;;
     arm64) key="linux-arm64-v8a.zip" ;;
     armv7) key="linux-arm32-v7a.zip" ;;
-    *) err "不支持的架构：$ARCH"; return 1 ;;
+    *) err "不支持架构：$ARCH"; return 1 ;;
   esac
 
   local url
@@ -162,7 +154,7 @@ download_and_install_singbox(){
     amd64) key="linux-amd64.tar.gz" ;;
     arm64) key="linux-arm64.tar.gz" ;;
     armv7) key="linux-armv7.tar.gz" ;;
-    *) err "不支持的架构：$ARCH"; return 1 ;;
+    *) err "不支持架构：$ARCH"; return 1 ;;
   esac
 
   local url
@@ -183,7 +175,7 @@ download_and_install_singbox(){
 # --------- systemd ----------
 ensure_systemd(){
   if ! have systemctl; then
-    err "当前系统没有 systemd（systemctl 不存在）。该脚本优先支持 systemd 系统。"
+    err "系统没有 systemd（systemctl 不存在）"
     exit 1
   fi
 }
@@ -229,10 +221,9 @@ svc_enable_start(){ systemctl enable --now "$1" >/dev/null 2>&1 || true; systemc
 svc_restart(){ systemctl restart "$1" >/dev/null 2>&1 || true; }
 svc_status(){ systemctl is-active "$1" >/dev/null 2>&1 && echo "active" || echo "inactive"; }
 
-# --------- 防火墙放行 ----------
+# --------- Ports ----------
 open_port(){
   local port="$1" proto="$2"
-
   if have ufw; then
     ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
     return 0
@@ -246,13 +237,12 @@ open_port(){
     iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1 \
       || iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT
     if have netfilter-persistent; then netfilter-persistent save >/dev/null 2>&1 || true; fi
-    if have service; then service iptables save >/dev/null 2>&1 || true; fi
     return 0
   fi
-  warn "未检测到 ufw/firewalld/iptables，跳过放行端口：$port/$proto（请确认云安全组）"
+  warn "未检测到 ufw/firewalld/iptables（请确认云安全组已放行 ${port}/${proto}）"
 }
 
-# --------- 元数据 ----------
+# --------- Meta ----------
 init_meta(){
   mkdir -p "$META_DIR"
   if [[ ! -f "$META_JSON" ]]; then
@@ -274,7 +264,7 @@ meta_set_bind_mode(){
   mv "$tmp" "$META_JSON"
 }
 
-# --------- 默认配置 ----------
+# --------- Default configs ----------
 init_xray_cfg(){
   mkdir -p /etc/xray
   if [[ ! -f "$XRAY_CFG" ]]; then
@@ -305,7 +295,7 @@ JSON
   fi
 }
 
-# --------- 证书（自签） ----------
+# --------- Self-signed cert ----------
 gen_self_signed(){
   local crt="$1" key="$2" cn="${3:-example.com}"
   mkdir -p "$CERT_DIR"
@@ -315,7 +305,7 @@ gen_self_signed(){
     -keyout "$key" -out "$crt" >/dev/null 2>&1
 }
 
-# --------- JSON 追加/删除 ----------
+# --------- JSON ops ----------
 json_append_inbound_xray(){
   local obj="$1"
   tmp="$(mktemp)"
@@ -341,7 +331,7 @@ json_del_inbound_sb_by_tag(){
   mv "$tmp" "$SB_CFG"
 }
 
-# --------- 获取服务器 IP（简易） ----------
+# --------- Public IP ----------
 get_public_ip_best_effort(){
   local ip=""
   ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
@@ -349,7 +339,7 @@ get_public_ip_best_effort(){
   echo "${ip:-YOUR_SERVER_IP}"
 }
 
-# --------- QR ----------
+# --------- QR / Base64 ----------
 qrcode_maybe(){
   local text="$1"
   if have qrencode; then
@@ -358,11 +348,9 @@ qrcode_maybe(){
     echo
   fi
 }
-
-# --------- Base64 ----------
 b64(){ if have base64; then base64 -w 0; else openssl base64 -A; fi; }
 
-# --------- 导出单个 ----------
+# --------- Export one ----------
 export_links_one(){
   local tag="$1"
   local host
@@ -371,6 +359,7 @@ export_links_one(){
   echo
   echo -e "${CYA}=== 导出：$tag ===${RST}"
 
+  # Reality
   if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t and .proto=="vless-reality")' "$META_JSON" >/dev/null 2>&1; then
     local uuid port sni sid pbk flow name
     uuid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
@@ -388,6 +377,7 @@ export_links_one(){
     return 0
   fi
 
+  # VMess WS noTLS
   if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t and .proto=="vmess-ws-notls")' "$META_JSON" >/dev/null 2>&1; then
     local uuid port path hosth name
     uuid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
@@ -410,6 +400,7 @@ export_links_one(){
     return 0
   fi
 
+  # VMess TCP HTTP
   if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t and .proto=="vmess-tcp-http")' "$META_JSON" >/dev/null 2>&1; then
     local uuid port path hosth name
     uuid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
@@ -432,6 +423,7 @@ export_links_one(){
     return 0
   fi
 
+  # TUIC
   if jq -e --arg t "$tag" '.singbox_inbounds[]? | select(.tag==$t and .proto=="tuic")' "$META_JSON" >/dev/null 2>&1; then
     local uuid password port sni name
     uuid="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
@@ -440,7 +432,7 @@ export_links_one(){
     sni="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .sni' "$META_JSON")"
     name="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
 
-    echo -e "${YLW}TUIC 这里给 sing-box 客户端片段（自签证书需 insecure=true）：${RST}"
+    echo -e "${YLW}TUIC：优先给 sing-box JSON（自签证书需 insecure=true）${RST}"
     jq -nc --arg tag "$name" --arg server "$host" --argjson port "$port" \
           --arg uuid "$uuid" --arg password "$password" --arg sni "$sni" \
 '{
@@ -457,9 +449,17 @@ export_links_one(){
     "insecure":true
   }
 }' | jq .
+
+    echo
+    echo -e "${YLW}TUIC：附赠分享链接（部分客户端支持）${RST}"
+    local tuic_link
+    tuic_link="tuic://${uuid}:${password}@${host}:${port}?sni=${sni}&allow_insecure=1#${name}"
+    echo -e "${GRN}${tuic_link}${RST}"
+    qrcode_maybe "$tuic_link"
     return 0
   fi
 
+  # HY2
   if jq -e --arg t "$tag" '.singbox_inbounds[]? | select(.tag==$t and .proto=="hy2")' "$META_JSON" >/dev/null 2>&1; then
     local password port sni name
     password="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .password' "$META_JSON")"
@@ -467,7 +467,13 @@ export_links_one(){
     sni="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .sni' "$META_JSON")"
     name="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
 
-    echo -e "${YLW}HY2 这里给 sing-box 客户端片段（自签证书需 insecure=true）：${RST}"
+    echo -e "${YLW}HY2：标准 URI（自签证书 insecure=1）${RST}"
+    local link
+    link="hysteria2://${password}@${host}:${port}/?sni=${sni}&insecure=1#${name}"
+    echo -e "${GRN}${link}${RST}"
+    qrcode_maybe "$link"
+
+    echo -e "${YLW}HY2：sing-box JSON（备用）${RST}"
     jq -nc --arg tag "$name" --arg server "$host" --argjson port "$port" \
           --arg password "$password" --arg sni "$sni" \
 '{
@@ -488,7 +494,7 @@ export_links_one(){
   warn "没有找到该 tag 的导出逻辑：$tag"
 }
 
-# --------- 列表/删除 ----------
+# --------- List/Delete ----------
 list_inbounds(){
   echo -e "${BLU}--- Xray 入站 ---${RST}"
   jq -r '.xray_inbounds[]? | "\(.tag)\t\(.proto)\t\(.port)\t\(.name)"' "$META_JSON" 2>/dev/null || true
@@ -525,13 +531,13 @@ delete_inbound(){
   warn "未找到该 tag：$tag"
 }
 
-# --------- 添加入站：Xray ----------
+# --------- Add inbounds (Xray) ----------
 add_vless_reality(){
   local name port sni sid flow
   read -rp "入站备注名（例如 US-Reality）: " name
   [[ -n "$name" ]] || name="Reality-$(date +%m%d%H%M)"
   read -rp "监听端口（回车随机 20000-50000）: " port
-  if [[ -z "$port" ]]; then port="$((20000 + RANDOM % 30000))"; fi
+  [[ -n "$port" ]] || port="$((20000 + RANDOM % 30000))"
   read -rp "Reality SNI（默认 www.cloudflare.com）: " sni
   [[ -n "$sni" ]] || sni="www.cloudflare.com"
   read -rp "shortId（回车随机 8字节hex）: " sid
@@ -542,14 +548,16 @@ add_vless_reality(){
   local uuid
   uuid="$(rand_uuid)"
 
+  # ✅ Fix: robust parse + hard check
   local xout priv pub
   xout="$($XRAY_BIN x25519 2>/dev/null || true)"
-  if [[ -z "$xout" ]]; then
-    err "生成 Reality keypair 失败：xray x25519 不可用"
+  priv="$(echo "$xout" | grep -i 'private' | head -n1 | sed -E 's/.*:[[:space:]]*//' | tr -d '\r')"
+  pub="$(echo "$xout"  | grep -i 'public'  | head -n1 | sed -E 's/.*:[[:space:]]*//' | tr -d '\r')"
+  if [[ -z "$priv" || -z "$pub" ]]; then
+    err "生成 Reality keypair 失败：xray x25519 输出解析不到 key（已阻止写入配置，避免崩）"
+    echo "$xout"
     return 1
   fi
-  priv="$(echo "$xout" | awk '/Private key/ {print $NF}')"
-  pub="$(echo "$xout" | awk '/Public key/ {print $NF}')"
 
   local tag="xray-${name// /_}-reality-${port}"
 
@@ -578,7 +586,7 @@ add_vless_reality(){
     "security": "reality",
     "realitySettings": {
       "show": false,
-      "dest": "443",
+      "dest": ($sni + ":443"),
       "xver": 0,
       "serverNames": [ $sni ],
       "privateKey": $priv,
@@ -624,7 +632,7 @@ add_vmess_ws_notls(){
   uuid="$(rand_uuid)"
   local tag="xray-${name// /_}-vmessws-${port}"
 
-  # ✅ 修复：先生成 headers JSON，再注入
+  # ✅ Fix: headers pre-gen (Host empty ok)
   local headers
   headers="$(jq -nc --arg host "$host" 'if ($host|length)>0 then {"Host":$host} else {} end')"
 
@@ -690,7 +698,7 @@ add_vmess_tcp_http(){
   uuid="$(rand_uuid)"
   local tag="xray-${name// /_}-vmess-tcp-http-${port}"
 
-  # ✅ 修复：先生成 headers JSON，再注入（Host 为空也不炸）
+  # ✅ Fix: headers pre-gen
   local headers
   headers="$(jq -nc --arg host "$host" '
     (if ($host|length)>0 then {"Host":[ $host ]} else {} end)
@@ -751,7 +759,7 @@ add_vmess_tcp_http(){
   export_links_one "$tag"
 }
 
-# --------- sing-box 入站 ----------
+# --------- Add inbounds (sing-box) ----------
 add_tuic(){
   local name port uuid password sni
   read -rp "入站备注名（例如 US-TUIC）: " name
@@ -877,7 +885,7 @@ add_hy2(){
   export_links_one "$tag"
 }
 
-# --------- 导出全部 ----------
+# --------- Export all ----------
 export_all(){
   list_inbounds | sed 's/\t/  /g'
   echo
@@ -890,7 +898,7 @@ export_all(){
   fi
 }
 
-# --------- 体检 ----------
+# --------- Health check ----------
 health_check(){
   echo -e "${BLU}=== XSB 体检 ===${RST}"
   echo -e "Xray:     $(svc_status xray)"
@@ -898,30 +906,16 @@ health_check(){
   echo
 
   echo -e "${CYA}监听端口（TCP）:${RST}"
-  ss -lntp 2>/dev/null | sed -n '1,30p' || true
+  ss -lntp 2>/dev/null | head -n 40 || true
   echo
   echo -e "${CYA}监听端口（UDP）:${RST}"
-  ss -lnup 2>/dev/null | sed -n '1,30p' || true
+  ss -lnup 2>/dev/null | head -n 40 || true
   echo
 
-  if have ufw; then
-    echo -e "${CYA}UFW 状态:${RST}"
-    ufw status verbose || true
-    echo
-  elif have firewall-cmd; then
-    echo -e "${CYA}Firewalld 状态:${RST}"
-    firewall-cmd --state || true
-    firewall-cmd --list-ports || true
-    echo
-  else
-    echo -e "${CYA}防火墙:${RST} 未检测到 ufw/firewalld（或你在用其他管理方式）"
-    echo
-  fi
-
-  warn "如果本机监听正常但外网仍不通：优先检查云厂商安全组/ACL（入站 TCP/UDP 端口）"
+  warn "如果本机监听正常但外网不通：优先检查云安全组/ACL（入站 TCP/UDP 端口）"
 }
 
-# --------- 延迟检测（本机轻量） ----------
+# --------- Local latency check ----------
 latency_test(){
   list_inbounds
   echo
@@ -974,10 +968,10 @@ latency_test(){
   fi
 
   echo
-  info "说明：这是服务器本机测试，用来判断“服务是否正常/监听是否存在”。真实延迟请以客户端测速为准。"
+  info "说明：这是服务器本机测试，用来判断监听/服务是否正常。真实延迟以客户端为准。"
 }
 
-# --------- 更新核心 ----------
+# --------- Core update ----------
 update_core(){
   echo "1) 更新 Xray"
   echo "2) 更新 sing-box"
@@ -990,7 +984,7 @@ update_core(){
   esac
 }
 
-# --------- 备份/恢复 ----------
+# --------- Backup/restore ----------
 backup_all(){
   local out="/root/xsb-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
   tar -czf "$out" \
@@ -1011,7 +1005,7 @@ restore_all(){
   ok "恢复完成（已重启服务）"
 }
 
-# --------- 监听模式 ----------
+# --------- Bind mode ----------
 choose_bind_mode(){
   echo "监听模式："
   echo "1) 双栈（推荐）"
@@ -1026,6 +1020,7 @@ choose_bind_mode(){
   ok "bind_mode=$(meta_get_bind_mode)"
 }
 
+# --------- Reset ----------
 reset_all_configs(){
   init_meta
   init_xray_cfg
@@ -1064,6 +1059,7 @@ install_or_reset(){
   ok "安装/初始化完成"
 }
 
+# --------- Template deploy ----------
 template_deploy(){
   echo "模板部署："
   echo "1) 通用机：Reality + TUIC + HY2 + VMess TCP HTTP"
