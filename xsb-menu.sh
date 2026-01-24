@@ -244,6 +244,103 @@ open_port(){
   warn "未检测到 ufw/firewalld/iptables（请确认云安全组已放行 ${port}/${proto}）"
 }
 
+# =========================
+# Firewall (UFW) - XSB Sync
+# =========================
+
+detect_ssh_port(){
+  local p=""
+  # 从 sshd_config 读取（优先）
+  if [[ -f /etc/ssh/sshd_config ]]; then
+    p="$(grep -E '^\s*Port\s+' /etc/ssh/sshd_config | tail -n1 | awk '{print $2}' | tr -d '\r')"
+  fi
+
+  # 兜底：从监听里找 sshd
+  if [[ -z "$p" ]]; then
+    p="$(ss -lntp 2>/dev/null | awk '/sshd/ {print $4}' | tail -n1 | awk -F: '{print $NF}' | tr -d '\r')"
+  fi
+
+  # 再兜底：22
+  [[ -n "$p" ]] || p="22"
+  echo "$p"
+}
+
+fw_install_ufw(){
+  if command -v ufw >/dev/null 2>&1; then return 0; fi
+  info "正在安装 UFW..."
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y ufw >/dev/null 2>&1
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y ufw >/dev/null 2>&1
+    systemctl enable --now ufw >/dev/null 2>&1 || true
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y ufw >/dev/null 2>&1
+    systemctl enable --now ufw >/dev/null 2>&1 || true
+  else
+    err "无法自动安装 ufw（请手动安装）"
+    return 1
+  fi
+  ok "UFW 已安装"
+}
+
+fw_allow(){
+  local port="$1" proto="$2" note="${3:-}"
+  [[ -n "$port" && -n "$proto" ]] || return 0
+  ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+  [[ -n "$note" ]] && echo -e "  + 放行 ${port}/${proto}  ${note}"
+}
+
+fw_sync_from_meta(){
+  init_meta
+
+  fw_install_ufw || return 1
+
+  local ssh_port
+  ssh_port="$(detect_ssh_port)"
+
+  info "配置 UFW 默认策略..."
+  ufw --force reset >/dev/null 2>&1 || true
+  ufw default deny incoming >/dev/null 2>&1 || true
+  ufw default allow outgoing >/dev/null 2>&1 || true
+
+  info "放行 SSH 端口：${ssh_port}/tcp"
+  fw_allow "$ssh_port" "tcp" "(SSH)"
+
+  info "同步放行 Xray 入站端口（TCP）..."
+  jq -r '.xray_inbounds[]? | "\(.port)\t\(.proto)\t\(.name)"' "$META_JSON" 2>/dev/null \
+  | while IFS=$'\t' read -r port proto name; do
+      # xray 这几个都是 TCP
+      fw_allow "$port" "tcp" "(${proto} ${name})"
+    done
+
+  info "同步放行 sing-box 入站端口（按协议）..."
+  jq -r '.singbox_inbounds[]? | "\(.port)\t\(.proto)\t\(.name)"' "$META_JSON" 2>/dev/null \
+  | while IFS=$'\t' read -r port proto name; do
+      case "$proto" in
+        tuic|hy2) fw_allow "$port" "udp" "(${proto} ${name})" ;;
+        *)        fw_allow "$port" "tcp" "(${proto} ${name})" ;; # 兜底
+      esac
+    done
+
+  info "启用 UFW..."
+  ufw --force enable >/dev/null 2>&1 || true
+
+  ok "UFW 已启用并完成规则同步 ✅"
+  echo
+  ufw status verbose
+  echo
+  warn "提醒：云厂商安全组/ACL 也要放行对应端口，否则 UFW 放了外面也进不来。"
+}
+
+fw_status(){
+  if ! command -v ufw >/dev/null 2>&1; then
+    warn "未安装 ufw"
+    return 0
+  fi
+  ufw status verbose || true
+}
+
 # --------- Meta ----------
 init_meta(){
   mkdir -p "$META_DIR"
