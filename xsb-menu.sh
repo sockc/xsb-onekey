@@ -9,22 +9,15 @@
 #   - TUIC (sing-box)
 #   - Hysteria2 (sing-box)
 #
-# 功能：
-#   1) 一键安装/重置（自动识别系统/架构 amd64/arm64）
-#   2) 模板部署（通用/UDP受限/纯IPv6）+ 高级自定义
-#   3) 添加/删除/启用/停用 入站
-#   4) 导出：分享链接/订阅(简版)/二维码
-#   5) 节点体检（监听/防火墙/服务状态）
-#   6) 延迟检测（本机握手/连接耗时，轻量不耗流量）
-#   7) 更新核心（可选 xray / sing-box）
-#   8) 备份/恢复/迁移
-#
-# 注意：
-#   - TUIC / Hy2 需要 TLS。脚本默认生成自签证书（客户端需 allow_insecure）。
-#   - 你不需要“安全加固一条龙”，这里不会动 SSH / fail2ban 等。
+# 修复内容：
+#   - 修复 jq 兼容性问题：不再在 jq 内用复杂三元表达式 + 对象字面量
+#     改为先生成 headers JSON，再 --argjson 注入（兼容各种 jq 版本）
+#   - VERSION 字段用于 install.sh 显示版本
 # =========================================================
 
 set -euo pipefail
+
+VERSION="1.0.1"
 
 # --------- 基本路径（标准目录） ----------
 XRAY_BIN="/usr/local/bin/xray"
@@ -110,28 +103,27 @@ detect_arch(){
 install_deps(){
   detect_os
   local common=(curl jq openssl tar)
-  # qrencode 可选
   if [[ "$PKG" == "apt" ]]; then
     apt-get update -y
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${common[@]}" ca-certificates coreutils
     apt-get install -y uuid-runtime >/dev/null 2>&1 || true
     apt-get install -y qrencode >/dev/null 2>&1 || true
     apt-get install -y netcat-openbsd >/dev/null 2>&1 || true
+    apt-get install -y unzip >/dev/null 2>&1 || true
   elif [[ "$PKG" == "yum" || "$PKG" == "dnf" ]]; then
     $PKG install -y "${common[@]}" ca-certificates coreutils
     $PKG install -y util-linux >/dev/null 2>&1 || true
     $PKG install -y qrencode >/dev/null 2>&1 || true
     $PKG install -y nc >/dev/null 2>&1 || true
+    $PKG install -y unzip >/dev/null 2>&1 || true
   else
-    warn "跳过自动安装依赖（未知系统）。请确保存在：curl jq openssl tar"
+    warn "跳过自动安装依赖（未知系统）。请确保存在：curl jq openssl tar unzip"
   fi
   ok "依赖检查完成"
 }
 
 # --------- GitHub Release 下载 ----------
 gh_latest_asset_url(){
-  # $1 = repo like "XTLS/Xray-core"
-  # $2 = grep key like "linux-64.zip"
   local repo="$1"
   local key="$2"
   curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" \
@@ -156,7 +148,6 @@ download_and_install_xray(){
 
   local tmp="/tmp/xray.zip"
   curl -fL "$url" -o "$tmp"
-  have unzip || { [[ "$PKG" == "apt" ]] && apt-get install -y unzip || $PKG install -y unzip; }
   rm -rf /tmp/xray_unz && mkdir -p /tmp/xray_unz
   unzip -qo "$tmp" -d /tmp/xray_unz
   install -m 755 /tmp/xray_unz/xray "$XRAY_BIN"
@@ -166,8 +157,6 @@ download_and_install_xray(){
 download_and_install_singbox(){
   detect_arch
   info "下载 sing-box 最新版（$ARCH）..."
-  # sing-box release 名称经常变化，这里用通用匹配：
-  # 例：sing-box-1.10.0-linux-amd64.tar.gz
   local key=""
   case "$ARCH" in
     amd64) key="linux-amd64.tar.gz" ;;
@@ -235,26 +224,13 @@ WantedBy=multi-user.target
 EOF
 }
 
-reload_systemd(){
-  systemctl daemon-reload
-}
+reload_systemd(){ systemctl daemon-reload; }
+svc_enable_start(){ systemctl enable --now "$1" >/dev/null 2>&1 || true; systemctl restart "$1" >/dev/null 2>&1 || true; }
+svc_restart(){ systemctl restart "$1" >/dev/null 2>&1 || true; }
+svc_status(){ systemctl is-active "$1" >/dev/null 2>&1 && echo "active" || echo "inactive"; }
 
-svc_enable_start(){
-  systemctl enable --now "$1" >/dev/null 2>&1 || true
-  systemctl restart "$1" >/dev/null 2>&1 || true
-}
-
-svc_restart(){
-  systemctl restart "$1" >/dev/null 2>&1 || true
-}
-
-svc_status(){
-  systemctl is-active "$1" >/dev/null 2>&1 && echo "active" || echo "inactive"
-}
-
-# --------- 防火墙放行（最小化，只开你选的端口） ----------
+# --------- 防火墙放行 ----------
 open_port(){
-  # $1=port, $2=proto tcp/udp
   local port="$1" proto="$2"
 
   if have ufw; then
@@ -266,11 +242,9 @@ open_port(){
     firewall-cmd --reload >/dev/null 2>&1 || true
     return 0
   fi
-  # iptables fallback
   if have iptables; then
     iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1 \
       || iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT
-    # 尝试持久化（不同系统不同）
     if have netfilter-persistent; then netfilter-persistent save >/dev/null 2>&1 || true; fi
     if have service; then service iptables save >/dev/null 2>&1 || true; fi
     return 0
@@ -292,10 +266,7 @@ JSON
   fi
 }
 
-meta_get_bind_mode(){
-  jq -r '.bind_mode' "$META_JSON"
-}
-
+meta_get_bind_mode(){ jq -r '.bind_mode' "$META_JSON"; }
 meta_set_bind_mode(){
   local mode="$1"
   tmp="$(mktemp)"
@@ -303,20 +274,7 @@ meta_set_bind_mode(){
   mv "$tmp" "$META_JSON"
 }
 
-# --------- 监听地址选择 ----------
-listen_addrs(){
-  # return JSON array for xray listen / sing-box listen
-  local mode
-  mode="$(meta_get_bind_mode)"
-  case "$mode" in
-    v4) echo '["0.0.0.0"]' ;;
-    v6) echo '["::"]' ;;
-    dual) echo '["0.0.0.0","::"]' ;;
-    *) echo '["0.0.0.0","::"]' ;;
-  esac
-}
-
-# --------- 默认配置初始化 ----------
+# --------- 默认配置 ----------
 init_xray_cfg(){
   mkdir -p /etc/xray
   if [[ ! -f "$XRAY_CFG" ]]; then
@@ -349,45 +307,222 @@ JSON
 
 # --------- 证书（自签） ----------
 gen_self_signed(){
-  # $1=crt $2=key $3=CN
   local crt="$1" key="$2" cn="${3:-example.com}"
   mkdir -p "$CERT_DIR"
-  if [[ -f "$crt" && -f "$key" ]]; then
-    return 0
-  fi
+  if [[ -f "$crt" && -f "$key" ]]; then return 0; fi
   openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
     -subj "/CN=${cn}" \
     -keyout "$key" -out "$crt" >/dev/null 2>&1
 }
 
-# --------- 工具：JSON 追加/删除 ----------
+# --------- JSON 追加/删除 ----------
 json_append_inbound_xray(){
-  # $1 = inbound object json
   local obj="$1"
   tmp="$(mktemp)"
   jq --argjson o "$obj" '.inbounds += [$o]' "$XRAY_CFG" >"$tmp"
   mv "$tmp" "$XRAY_CFG"
 }
-
 json_del_inbound_xray_by_tag(){
   local tag="$1"
   tmp="$(mktemp)"
   jq --arg t "$tag" '.inbounds |= map(select(.tag != $t))' "$XRAY_CFG" >"$tmp"
   mv "$tmp" "$XRAY_CFG"
 }
-
 json_append_inbound_sb(){
   local obj="$1"
   tmp="$(mktemp)"
   jq --argjson o "$obj" '.inbounds += [$o]' "$SB_CFG" >"$tmp"
   mv "$tmp" "$SB_CFG"
 }
-
 json_del_inbound_sb_by_tag(){
   local tag="$1"
   tmp="$(mktemp)"
   jq --arg t "$tag" '.inbounds |= map(select(.tag != $t))' "$SB_CFG" >"$tmp"
   mv "$tmp" "$SB_CFG"
+}
+
+# --------- 获取服务器 IP（简易） ----------
+get_public_ip_best_effort(){
+  local ip=""
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
+  if [[ -z "$ip" ]]; then ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"; fi
+  echo "${ip:-YOUR_SERVER_IP}"
+}
+
+# --------- QR ----------
+qrcode_maybe(){
+  local text="$1"
+  if have qrencode; then
+    echo
+    qrencode -t ANSIUTF8 "$text" || true
+    echo
+  fi
+}
+
+# --------- Base64 ----------
+b64(){ if have base64; then base64 -w 0; else openssl base64 -A; fi; }
+
+# --------- 导出单个 ----------
+export_links_one(){
+  local tag="$1"
+  local host
+  host="$(get_public_ip_best_effort)"
+
+  echo
+  echo -e "${CYA}=== 导出：$tag ===${RST}"
+
+  if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t and .proto=="vless-reality")' "$META_JSON" >/dev/null 2>&1; then
+    local uuid port sni sid pbk flow name
+    uuid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
+    port="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .port' "$META_JSON")"
+    sni="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .sni' "$META_JSON")"
+    sid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .sid' "$META_JSON")"
+    pbk="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .pbk' "$META_JSON")"
+    flow="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .flow' "$META_JSON")"
+    name="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
+
+    local link
+    link="vless://${uuid}@${host}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp&flow=${flow}#${name}"
+    echo -e "${GRN}${link}${RST}"
+    qrcode_maybe "$link"
+    return 0
+  fi
+
+  if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t and .proto=="vmess-ws-notls")' "$META_JSON" >/dev/null 2>&1; then
+    local uuid port path hosth name
+    uuid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
+    port="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .port' "$META_JSON")"
+    path="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .path' "$META_JSON")"
+    hosth="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .host' "$META_JSON")"
+    name="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
+
+    local json vm
+    json="$(jq -nc --arg v "2" --arg ps "$name" --arg add "$host" --arg port "$port" \
+                --arg id "$uuid" --arg aid "0" --arg net "ws" --arg type "none" \
+                --arg hosth "$hosth" --arg path "$path" --arg tls "" \
+'{
+  v:$v, ps:$ps, add:$add, port:$port, id:$id, aid:$aid, net:$net,
+  type:$type, host:$hosth, path:$path, tls:$tls
+}')"
+    vm="vmess://$(printf '%s' "$json" | b64)"
+    echo -e "${GRN}${vm}${RST}"
+    qrcode_maybe "$vm"
+    return 0
+  fi
+
+  if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t and .proto=="vmess-tcp-http")' "$META_JSON" >/dev/null 2>&1; then
+    local uuid port path hosth name
+    uuid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
+    port="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .port' "$META_JSON")"
+    path="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .path' "$META_JSON")"
+    hosth="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .host' "$META_JSON")"
+    name="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
+
+    local json vm
+    json="$(jq -nc --arg v "2" --arg ps "$name" --arg add "$host" --arg port "$port" \
+                --arg id "$uuid" --arg aid "0" --arg net "tcp" --arg type "http" \
+                --arg hosth "$hosth" --arg path "$path" --arg tls "" \
+'{
+  v:$v, ps:$ps, add:$add, port:$port, id:$id, aid:$aid, net:$net,
+  type:$type, host:$hosth, path:$path, tls:$tls
+}')"
+    vm="vmess://$(printf '%s' "$json" | b64)"
+    echo -e "${GRN}${vm}${RST}"
+    qrcode_maybe "$vm"
+    return 0
+  fi
+
+  if jq -e --arg t "$tag" '.singbox_inbounds[]? | select(.tag==$t and .proto=="tuic")' "$META_JSON" >/dev/null 2>&1; then
+    local uuid password port sni name
+    uuid="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
+    password="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .password' "$META_JSON")"
+    port="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .port' "$META_JSON")"
+    sni="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .sni' "$META_JSON")"
+    name="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
+
+    echo -e "${YLW}TUIC 这里给 sing-box 客户端片段（自签证书需 insecure=true）：${RST}"
+    jq -nc --arg tag "$name" --arg server "$host" --argjson port "$port" \
+          --arg uuid "$uuid" --arg password "$password" --arg sni "$sni" \
+'{
+  "type":"tuic",
+  "tag":$tag,
+  "server":$server,
+  "server_port":$port,
+  "uuid":$uuid,
+  "password":$password,
+  "congestion_control":"bbr",
+  "tls":{
+    "enabled":true,
+    "server_name":$sni,
+    "insecure":true
+  }
+}' | jq .
+    return 0
+  fi
+
+  if jq -e --arg t "$tag" '.singbox_inbounds[]? | select(.tag==$t and .proto=="hy2")' "$META_JSON" >/dev/null 2>&1; then
+    local password port sni name
+    password="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .password' "$META_JSON")"
+    port="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .port' "$META_JSON")"
+    sni="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .sni' "$META_JSON")"
+    name="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
+
+    echo -e "${YLW}HY2 这里给 sing-box 客户端片段（自签证书需 insecure=true）：${RST}"
+    jq -nc --arg tag "$name" --arg server "$host" --argjson port "$port" \
+          --arg password "$password" --arg sni "$sni" \
+'{
+  "type":"hysteria2",
+  "tag":$tag,
+  "server":$server,
+  "server_port":$port,
+  "password":$password,
+  "tls":{
+    "enabled":true,
+    "server_name":$sni,
+    "insecure":true
+  }
+}' | jq .
+    return 0
+  fi
+
+  warn "没有找到该 tag 的导出逻辑：$tag"
+}
+
+# --------- 列表/删除 ----------
+list_inbounds(){
+  echo -e "${BLU}--- Xray 入站 ---${RST}"
+  jq -r '.xray_inbounds[]? | "\(.tag)\t\(.proto)\t\(.port)\t\(.name)"' "$META_JSON" 2>/dev/null || true
+  echo -e "${BLU}--- sing-box 入站 ---${RST}"
+  jq -r '.singbox_inbounds[]? | "\(.tag)\t\(.proto)\t\(.port)\t\(.name)"' "$META_JSON" 2>/dev/null || true
+}
+
+delete_inbound(){
+  list_inbounds
+  echo
+  read -rp "输入要删除的 tag： " tag
+  [[ -n "$tag" ]] || { warn "未输入 tag"; return 0; }
+
+  if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t)' "$META_JSON" >/dev/null 2>&1; then
+    json_del_inbound_xray_by_tag "$tag"
+    tmp="$(mktemp)"
+    jq --arg t "$tag" '.xray_inbounds |= map(select(.tag != $t))' "$META_JSON" >"$tmp"
+    mv "$tmp" "$META_JSON"
+    svc_restart xray
+    ok "已删除 Xray 入站：$tag"
+    return 0
+  fi
+
+  if jq -e --arg t "$tag" '.singbox_inbounds[]? | select(.tag==$t)' "$META_JSON" >/dev/null 2>&1; then
+    json_del_inbound_sb_by_tag "$tag"
+    tmp="$(mktemp)"
+    jq --arg t "$tag" '.singbox_inbounds |= map(select(.tag != $t))' "$META_JSON" >"$tmp"
+    mv "$tmp" "$META_JSON"
+    svc_restart sing-box
+    ok "已删除 sing-box 入站：$tag"
+    return 0
+  fi
+
+  warn "未找到该 tag：$tag"
 }
 
 # --------- 添加入站：Xray ----------
@@ -407,7 +542,6 @@ add_vless_reality(){
   local uuid
   uuid="$(rand_uuid)"
 
-  # keypair
   local xout priv pub
   xout="$($XRAY_BIN x25519 2>/dev/null || true)"
   if [[ -z "$xout" ]]; then
@@ -417,12 +551,8 @@ add_vless_reality(){
   priv="$(echo "$xout" | awk '/Private key/ {print $NF}')"
   pub="$(echo "$xout" | awk '/Public key/ {print $NF}')"
 
-  local addrs
-  addrs="$(listen_addrs)"
-
   local tag="xray-${name// /_}-reality-${port}"
 
-  # Xray inbound obj
   local inbound
   inbound="$(jq -nc \
     --arg tag "$tag" \
@@ -430,12 +560,11 @@ add_vless_reality(){
     --arg sni "$sni" \
     --arg sid "$sid" \
     --arg priv "$priv" \
-    --argjson addrs "$addrs" \
     --arg flow "$flow" \
     --argjson port "$port" \
 '{
   "tag": $tag,
-  "listen": $addrs[0],
+  "listen": "0.0.0.0",
   "port": $port,
   "protocol": "vless",
   "settings": {
@@ -459,20 +588,13 @@ add_vless_reality(){
   "sniffing": { "enabled": true, "destOverride": ["http","tls"] }
 }')"
 
-  # 注意：Xray 只支持单 listen，这里如果 dual/v6，需要用多个 inbound。
-  # 为了不爆炸：如果 bind_mode=dual，就默认 0.0.0.0（更兼容），纯v6模式才监听 ::
   local mode
   mode="$(meta_get_bind_mode)"
-  if [[ "$mode" == "v6" ]]; then
-    inbound="$(echo "$inbound" | jq '.listen="::"')"
-  else
-    inbound="$(echo "$inbound" | jq '.listen="0.0.0.0"')"
-  fi
+  if [[ "$mode" == "v6" ]]; then inbound="$(echo "$inbound" | jq '.listen="::"')"; fi
 
   json_append_inbound_xray "$inbound"
   open_port "$port" "tcp"
 
-  # 记录元数据
   tmp="$(mktemp)"
   jq --arg tag "$tag" --arg name "$name" --arg proto "vless-reality" --arg uuid "$uuid" \
      --arg port "$port" --arg sni "$sni" --arg sid "$sid" --arg pbk "$pub" --arg flow "$flow" \
@@ -500,17 +622,18 @@ add_vmess_ws_notls(){
 
   local uuid
   uuid="$(rand_uuid)"
-
   local tag="xray-${name// /_}-vmessws-${port}"
 
-  local inbound
+  # ✅ 修复：先生成 headers JSON，再注入
+  local headers
   headers="$(jq -nc --arg host "$host" 'if ($host|length)>0 then {"Host":$host} else {} end')"
-  
+
+  local inbound
   inbound="$(jq -nc \
     --arg tag "$tag" \
     --arg uuid "$uuid" \
     --arg path "$path" \
-    --arg host "$host" \
+    --argjson headers "$headers" \
     --argjson port "$port" \
 '{
   "tag": $tag,
@@ -567,18 +690,19 @@ add_vmess_tcp_http(){
   uuid="$(rand_uuid)"
   local tag="xray-${name// /_}-vmess-tcp-http-${port}"
 
-  # Xray 的 tcp + http header 伪装
-  local inbound 
+  # ✅ 修复：先生成 headers JSON，再注入（Host 为空也不炸）
+  local headers
   headers="$(jq -nc --arg host "$host" '
-  (if ($host|length)>0 then {"Host":[ $host ]} else {} end)
-  + {"User-Agent":["Mozilla/5.0"],"Accept-Encoding":["gzip, deflate"],"Connection":["keep-alive"],"Pragma":["no-cache"]}
-')"
+    (if ($host|length)>0 then {"Host":[ $host ]} else {} end)
+    + {"User-Agent":["Mozilla/5.0"],"Accept-Encoding":["gzip, deflate"],"Connection":["keep-alive"],"Pragma":["no-cache"]}
+  ')"
 
+  local inbound
   inbound="$(jq -nc \
     --arg tag "$tag" \
     --arg uuid "$uuid" \
     --arg path "$path" \
-    --arg host "$host" \
+    --argjson headers "$headers" \
     --argjson port "$port" \
 '{
   "tag": $tag,
@@ -598,12 +722,7 @@ add_vmess_tcp_http(){
           "version": "1.1",
           "method": "GET",
           "path": [ $path ],
-          "headers": (if ($host|length) > 0 then
-            {"Host":[ $host ],"User-Agent":["Mozilla/5.0"],"Accept-Encoding":["gzip, deflate"],"Connection":["keep-alive"],"Pragma":"no-cache"}
-          else
-            {"User-Agent":["Mozilla/5.0"],"Accept-Encoding":["gzip, deflate"],"Connection":["keep-alive"],"Pragma":"no-cache"}
-          end)
-          )
+          "headers": $headers
         }
       }
     }
@@ -632,7 +751,7 @@ add_vmess_tcp_http(){
   export_links_one "$tag"
 }
 
-# --------- 添加入站：sing-box ----------
+# --------- sing-box 入站 ----------
 add_tuic(){
   local name port uuid password sni
   read -rp "入站备注名（例如 US-TUIC）: " name
@@ -675,11 +794,9 @@ add_tuic(){
   }
 }')"
 
-  # bind_mode：v4 / v6 / dual
   local mode
   mode="$(meta_get_bind_mode)"
   if [[ "$mode" == "v4" ]]; then inbound="$(echo "$inbound" | jq '.listen="0.0.0.0"')"; fi
-  if [[ "$mode" == "dual" ]]; then inbound="$(echo "$inbound" | jq '.listen="::"')"; fi
 
   json_append_inbound_sb "$inbound"
   open_port "$port" "udp"
@@ -760,190 +877,7 @@ add_hy2(){
   export_links_one "$tag"
 }
 
-# --------- 列表/删除 ----------
-list_inbounds(){
-  echo -e "${BLU}--- Xray 入站 ---${RST}"
-  jq -r '.xray_inbounds[]? | "\(.tag)\t\(.proto)\t\(.port)\t\(.name)"' "$META_JSON" 2>/dev/null || true
-  echo -e "${BLU}--- sing-box 入站 ---${RST}"
-  jq -r '.singbox_inbounds[]? | "\(.tag)\t\(.proto)\t\(.port)\t\(.name)"' "$META_JSON" 2>/dev/null || true
-}
-
-delete_inbound(){
-  list_inbounds
-  echo
-  read -rp "输入要删除的 tag： " tag
-  [[ -n "$tag" ]] || { warn "未输入 tag"; return 0; }
-
-  if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t)' "$META_JSON" >/dev/null 2>&1; then
-    json_del_inbound_xray_by_tag "$tag"
-    tmp="$(mktemp)"
-    jq --arg t "$tag" '.xray_inbounds |= map(select(.tag != $t))' "$META_JSON" >"$tmp"
-    mv "$tmp" "$META_JSON"
-    svc_restart xray
-    ok "已删除 Xray 入站：$tag"
-    return 0
-  fi
-
-  if jq -e --arg t "$tag" '.singbox_inbounds[]? | select(.tag==$t)' "$META_JSON" >/dev/null 2>&1; then
-    json_del_inbound_sb_by_tag "$tag"
-    tmp="$(mktemp)"
-    jq --arg t "$tag" '.singbox_inbounds |= map(select(.tag != $t))' "$META_JSON" >"$tmp"
-    mv "$tmp" "$META_JSON"
-    svc_restart sing-box
-    ok "已删除 sing-box 入站：$tag"
-    return 0
-  fi
-
-  warn "未找到该 tag：$tag"
-}
-
-# --------- 获取服务器 IP（简易） ----------
-get_public_ip_best_effort(){
-  # 不强依赖外网，尽量取本机默认出口 IP
-  local ip=""
-  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
-  if [[ -z "$ip" ]]; then
-    ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  fi
-  echo "${ip:-YOUR_SERVER_IP}"
-}
-
-# --------- 导出链接 ----------
-b64(){
-  # base64 without newline
-  if have base64; then base64 -w 0; else openssl base64 -A; fi
-}
-
-export_links_one(){
-  local tag="$1"
-  local host
-  host="$(get_public_ip_best_effort)"
-
-  echo
-  echo -e "${CYA}=== 导出：$tag ===${RST}"
-
-  # Xray reality
-  if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t and .proto=="vless-reality")' "$META_JSON" >/dev/null 2>&1; then
-    local uuid port sni sid pbk flow name
-    uuid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
-    port="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .port' "$META_JSON")"
-    sni="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .sni' "$META_JSON")"
-    sid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .sid' "$META_JSON")"
-    pbk="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .pbk' "$META_JSON")"
-    flow="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .flow' "$META_JSON")"
-    name="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
-
-    local link
-    link="vless://${uuid}@${host}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp&flow=${flow}#${name}"
-    echo -e "${GRN}${link}${RST}"
-    qrcode_maybe "$link"
-    return 0
-  fi
-
-  # VMess WS noTLS
-  if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t and .proto=="vmess-ws-notls")' "$META_JSON" >/dev/null 2>&1; then
-    local uuid port path hosth name
-    uuid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
-    port="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .port' "$META_JSON")"
-    path="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .path' "$META_JSON")"
-    hosth="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .host' "$META_JSON")"
-    name="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
-
-    local json vm
-    json="$(jq -nc --arg v "2" --arg ps "$name" --arg add "$host" --arg port "$port" \
-                --arg id "$uuid" --arg aid "0" --arg net "ws" --arg type "none" \
-                --arg hosth "$hosth" --arg path "$path" --arg tls "" \
-'{
-  v:$v, ps:$ps, add:$add, port:$port, id:$id, aid:$aid, net:$net,
-  type:$type, host:$hosth, path:$path, tls:$tls
-}')"
-    vm="vmess://$(printf '%s' "$json" | b64)"
-    echo -e "${GRN}${vm}${RST}"
-    qrcode_maybe "$vm"
-    return 0
-  fi
-
-  # VMess TCP HTTP
-  if jq -e --arg t "$tag" '.xray_inbounds[]? | select(.tag==$t and .proto=="vmess-tcp-http")' "$META_JSON" >/dev/null 2>&1; then
-    local uuid port path hosth name
-    uuid="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
-    port="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .port' "$META_JSON")"
-    path="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .path' "$META_JSON")"
-    hosth="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .host' "$META_JSON")"
-    name="$(jq -r --arg t "$tag" '.xray_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
-
-    local json vm
-    json="$(jq -nc --arg v "2" --arg ps "$name" --arg add "$host" --arg port "$port" \
-                --arg id "$uuid" --arg aid "0" --arg net "tcp" --arg type "http" \
-                --arg hosth "$hosth" --arg path "$path" --arg tls "" \
-'{
-  v:$v, ps:$ps, add:$add, port:$port, id:$id, aid:$aid, net:$net,
-  type:$type, host:$hosth, path:$path, tls:$tls
-}')"
-    vm="vmess://$(printf '%s' "$json" | b64)"
-    echo -e "${GRN}${vm}${RST}"
-    qrcode_maybe "$vm"
-    return 0
-  fi
-
-  # TUIC
-  if jq -e --arg t "$tag" '.singbox_inbounds[]? | select(.tag==$t and .proto=="tuic")' "$META_JSON" >/dev/null 2>&1; then
-    local uuid password port sni name
-    uuid="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .uuid' "$META_JSON")"
-    password="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .password' "$META_JSON")"
-    port="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .port' "$META_JSON")"
-    sni="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .sni' "$META_JSON")"
-    name="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
-
-    echo -e "${YLW}TUIC 没有统一通用的“分享链接标准”。这里给你一份 sing-box 客户端片段（需 allow_insecure=true）：${RST}"
-    jq -nc --arg tag "$name" --arg server "$host" --argjson port "$port" \
-          --arg uuid "$uuid" --arg password "$password" --arg sni "$sni" \
-'{
-  "type":"tuic",
-  "tag":$tag,
-  "server":$server,
-  "server_port":$port,
-  "uuid":$uuid,
-  "password":$password,
-  "congestion_control":"bbr",
-  "tls":{
-    "enabled":true,
-    "server_name":$sni,
-    "insecure":true
-  }
-}' | jq .
-    return 0
-  fi
-
-  # HY2
-  if jq -e --arg t "$tag" '.singbox_inbounds[]? | select(.tag==$t and .proto=="hy2")' "$META_JSON" >/dev/null 2>&1; then
-    local password port sni name
-    password="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .password' "$META_JSON")"
-    port="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .port' "$META_JSON")"
-    sni="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .sni' "$META_JSON")"
-    name="$(jq -r --arg t "$tag" '.singbox_inbounds[] | select(.tag==$t) | .name' "$META_JSON")"
-
-    echo -e "${YLW}HY2 同样没有统一通用“分享链接标准”。这里给你 sing-box 客户端片段（需 allow_insecure=true）：${RST}"
-    jq -nc --arg tag "$name" --arg server "$host" --argjson port "$port" \
-          --arg password "$password" --arg sni "$sni" \
-'{
-  "type":"hysteria2",
-  "tag":$tag,
-  "server":$server,
-  "server_port":$port,
-  "password":$password,
-  "tls":{
-    "enabled":true,
-    "server_name":$sni,
-    "insecure":true
-  }
-}' | jq .
-    return 0
-  fi
-
-  warn "没有找到该 tag 的导出逻辑：$tag"
-}
-
+# --------- 导出全部 ----------
 export_all(){
   list_inbounds | sed 's/\t/  /g'
   echo
@@ -956,15 +890,6 @@ export_all(){
   fi
 }
 
-qrcode_maybe(){
-  local text="$1"
-  if have qrencode; then
-    echo
-    qrencode -t ANSIUTF8 "$text" || true
-    echo
-  fi
-}
-
 # --------- 体检 ----------
 health_check(){
   echo -e "${BLU}=== XSB 体检 ===${RST}"
@@ -973,10 +898,10 @@ health_check(){
   echo
 
   echo -e "${CYA}监听端口（TCP）:${RST}"
-  ss -lntp 2>/dev/null | sed -n '1,20p' || true
+  ss -lntp 2>/dev/null | sed -n '1,30p' || true
   echo
   echo -e "${CYA}监听端口（UDP）:${RST}"
-  ss -lnup 2>/dev/null | sed -n '1,20p' || true
+  ss -lnup 2>/dev/null | sed -n '1,30p' || true
   echo
 
   if have ufw; then
@@ -996,7 +921,7 @@ health_check(){
   warn "如果本机监听正常但外网仍不通：优先检查云厂商安全组/ACL（入站 TCP/UDP 端口）"
 }
 
-# --------- 延迟检测（本机连接耗时，轻量） ----------
+# --------- 延迟检测（本机轻量） ----------
 latency_test(){
   list_inbounds
   echo
@@ -1014,7 +939,6 @@ latency_test(){
 
   test_one_udp_listen(){
     local port="$1"
-    # UDP 无连接语义，这里用“是否监听”作为轻量指标
     if ss -lnup 2>/dev/null | grep -qE "[:.]${port}\b"; then
       echo "LISTEN"
     else
@@ -1050,7 +974,7 @@ latency_test(){
   fi
 
   echo
-  info "说明：这是服务器本机测试，用来判断“服务是否正常/监听是否存在”。真实客户端延迟以客户端测速为准。"
+  info "说明：这是服务器本机测试，用来判断“服务是否正常/监听是否存在”。真实延迟请以客户端测速为准。"
 }
 
 # --------- 更新核心 ----------
@@ -1087,12 +1011,12 @@ restore_all(){
   ok "恢复完成（已重启服务）"
 }
 
-# --------- 安装/重置 ----------
+# --------- 监听模式 ----------
 choose_bind_mode(){
   echo "监听模式："
-  echo "1) 双栈（0.0.0.0 + ::）推荐"
-  echo "2) 仅 IPv4（0.0.0.0）"
-  echo "3) 仅 IPv6（::）"
+  echo "1) 双栈（推荐）"
+  echo "2) 仅 IPv4"
+  echo "3) 仅 IPv6"
   read -rp "选择 [1-3]（默认1）: " c
   case "$c" in
     2) meta_set_bind_mode "v4" ;;
@@ -1106,12 +1030,10 @@ reset_all_configs(){
   init_meta
   init_xray_cfg
   init_singbox_cfg
-  # 清空入站
   tmp="$(mktemp)"
   jq '.inbounds=[]' "$XRAY_CFG" >"$tmp" && mv "$tmp" "$XRAY_CFG"
   tmp="$(mktemp)"
   jq '.inbounds=[]' "$SB_CFG" >"$tmp" && mv "$tmp" "$SB_CFG"
-  # 清空 meta
   cat >"$META_JSON" <<'JSON'
 {
   "bind_mode": "dual",
@@ -1150,17 +1072,8 @@ template_deploy(){
   echo "0) 返回"
   read -rp "选择: " c
   case "$c" in
-    1)
-      add_vless_reality
-      add_tuic
-      add_hy2
-      add_vmess_tcp_http
-      ;;
-    2)
-      add_vless_reality
-      add_vmess_tcp_http
-      add_vmess_ws_notls
-      ;;
+    1) add_vless_reality; add_tuic; add_hy2; add_vmess_tcp_http ;;
+    2) add_vless_reality; add_vmess_tcp_http; add_vmess_ws_notls ;;
     3)
       meta_set_bind_mode "v6"
       ok "已切换到 仅IPv6 监听"
@@ -1172,9 +1085,7 @@ template_deploy(){
       read -rp "是否再加 HY2? (y/N): " yn2
       [[ "$yn2" =~ ^[Yy]$ ]] && add_hy2 || true
       ;;
-    *)
-      return 0
-      ;;
+    *) return 0 ;;
   esac
 }
 
@@ -1227,12 +1138,12 @@ uninstall_all(){
   ok "卸载完成"
 }
 
-# --------- 主菜单 ----------
 main_menu(){
   while true; do
     echo
     echo -e "${BLU}==============================${RST}"
     echo -e "${BLU}  XSB OneKey Manager Menu     ${RST}"
+    echo -e "${BLU}  VERSION: ${VERSION}          ${RST}"
     echo -e "${BLU}==============================${RST}"
     echo "1) 安装/初始化（Xray + sing-box）"
     echo "2) 重置（清空入站，保留二进制）"
