@@ -1351,6 +1351,8 @@ main_menu(){
     echo "11) 更新核心（Xray/sing-box）"
     echo "12) 备份"
     echo "13) 恢复"
+    echo "14) 防火墙(UFW)：自动放行SSH + 节点端口"
+    echo "15) 查看UFW状态"
     echo "0) 卸载并退出"
     echo
     read -rp "请选择: " c
@@ -1368,6 +1370,8 @@ main_menu(){
       11) update_core ;;
       12) backup_all ;;
       13) restore_all ;;
+      14) fw_sync_from_meta ;;
+      15) fw_status ;;
       0) uninstall_all; exit 0 ;;
       *) warn "无效选项" ;;
     esac
