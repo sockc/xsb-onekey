@@ -504,6 +504,8 @@ add_vmess_ws_notls(){
   local tag="xray-${name// /_}-vmessws-${port}"
 
   local inbound
+  headers="$(jq -nc --arg host "$host" 'if ($host|length)>0 then {"Host":$host} else {} end')"
+  
   inbound="$(jq -nc \
     --arg tag "$tag" \
     --arg uuid "$uuid" \
@@ -523,7 +525,7 @@ add_vmess_ws_notls(){
     "security": "none",
     "wsSettings": {
       "path": $path,
-      "headers": (if ($host|length) > 0 then {"Host": $host} else {} end)
+      "headers": $headers
     }
   },
   "sniffing": { "enabled": true, "destOverride": ["http","tls"] }
@@ -566,7 +568,12 @@ add_vmess_tcp_http(){
   local tag="xray-${name// /_}-vmess-tcp-http-${port}"
 
   # Xray 的 tcp + http header 伪装
-  local inbound
+  local inbound 
+  headers="$(jq -nc --arg host "$host" '
+  (if ($host|length)>0 then {"Host":[ $host ]} else {} end)
+  + {"User-Agent":["Mozilla/5.0"],"Accept-Encoding":["gzip, deflate"],"Connection":["keep-alive"],"Pragma":["no-cache"]}
+')"
+
   inbound="$(jq -nc \
     --arg tag "$tag" \
     --arg uuid "$uuid" \
