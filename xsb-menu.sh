@@ -523,7 +523,7 @@ add_vmess_ws_notls(){
     "security": "none",
     "wsSettings": {
       "path": $path,
-      "headers": ( $host | length > 0 ? {"Host":$host} : {} )
+      "headers": (if ($host|length) > 0 then {"Host": $host} else {} end)
     }
   },
   "sniffing": { "enabled": true, "destOverride": ["http","tls"] }
@@ -591,9 +591,11 @@ add_vmess_tcp_http(){
           "version": "1.1",
           "method": "GET",
           "path": [ $path ],
-          "headers": ( $host | length > 0
-            ? {"Host":[ $host ],"User-Agent":["Mozilla/5.0"],"Accept-Encoding":["gzip, deflate"],"Connection":["keep-alive"],"Pragma":"no-cache"}
-            : {"User-Agent":["Mozilla/5.0"],"Accept-Encoding":["gzip, deflate"],"Connection":["keep-alive"],"Pragma":"no-cache"}
+          "headers": (if ($host|length) > 0 then
+            {"Host":[ $host ],"User-Agent":["Mozilla/5.0"],"Accept-Encoding":["gzip, deflate"],"Connection":["keep-alive"],"Pragma":"no-cache"}
+          else
+            {"User-Agent":["Mozilla/5.0"],"Accept-Encoding":["gzip, deflate"],"Connection":["keep-alive"],"Pragma":"no-cache"}
+          end)
           )
         }
       }
