@@ -11,10 +11,10 @@
 set -euo pipefail
 
 # ---------------------------
-# ✅ 你必须改这里（默认仓库）
+#
 # ---------------------------
-DEFAULT_REPO="你的用户名/xsb-onekey"   # 例如：vinchi008/xsb-onekey
-DEFAULT_BRANCH="main"                # 你的默认分支，一般是 main
+DEFAULT_REPO="vinchi008/xsb-onekey"  
+DEFAULT_BRANCH="main"               
 
 # ---------------------------
 # 默认安装路径（可通过参数覆盖）
