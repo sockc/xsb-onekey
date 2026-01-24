@@ -17,6 +17,8 @@
 # =========================================================
 
 set -euo pipefail
+trap 'echo -e "\n❌ 脚本出错：第 $LINENO 行（退出码=$?）\n    你可以把这一屏发给我定位\n" >&2' ERR
+safe_run(){ "$@" || return 1; }
 
 VERSION="1.0.2"
 
@@ -533,6 +535,7 @@ delete_inbound(){
 
 # --------- Add inbounds (Xray) ----------
 add_vless_reality(){
+  set +e  # ✅ 关键：Reality 内部失败不要直接杀掉整个脚本
   local name port sni sid flow
   read -rp "入站备注名（例如 US-Reality）: " name
   [[ -n "$name" ]] || name="Reality-$(date +%m%d%H%M)"
@@ -548,19 +551,28 @@ add_vless_reality(){
   local uuid
   uuid="$(rand_uuid)"
 
-  # ✅ Fix: robust parse + hard check
+  # ✅ 生成 Reality keypair（最稳解析 + 强校验）
   local xout priv pub
-  xout="$($XRAY_BIN x25519 2>/dev/null || true)"
+  xout="$($XRAY_BIN x25519 2>/dev/null)"
   priv="$(echo "$xout" | grep -i 'private' | head -n1 | sed -E 's/.*:[[:space:]]*//' | tr -d '\r')"
   pub="$(echo "$xout"  | grep -i 'public'  | head -n1 | sed -E 's/.*:[[:space:]]*//' | tr -d '\r')"
+
   if [[ -z "$priv" || -z "$pub" ]]; then
-    err "生成 Reality keypair 失败：xray x25519 输出解析不到 key（已阻止写入配置，避免崩）"
+    err "Reality keypair 生成失败（解析不到 key），已阻止写入配置，避免 Xray 崩溃"
+    echo "---- xray x25519 原始输出 ----"
     echo "$xout"
+    echo "-----------------------------"
+    set -e
     return 1
   fi
 
   local tag="xray-${name// /_}-reality-${port}"
 
+  # ✅ 先备份配置，后写入（失败可回滚）
+  local bak="/etc/xray/config.json.bak.$(date +%F-%H%M%S)"
+  cp -a "$XRAY_CFG" "$bak"
+
+  # ✅ 生成 inbound JSON（dest = SNI:443）
   local inbound
   inbound="$(jq -nc \
     --arg tag "$tag" \
@@ -594,27 +606,61 @@ add_vless_reality(){
     }
   },
   "sniffing": { "enabled": true, "destOverride": ["http","tls"] }
-}')"
+}')" 
 
+  if [[ -z "$inbound" ]]; then
+    err "jq 生成 Reality inbound 失败，已回滚配置"
+    cp -a "$bak" "$XRAY_CFG"
+    set -e
+    return 1
+  fi
+
+  # ✅ IPv6/双栈监听模式
   local mode
   mode="$(meta_get_bind_mode)"
-  if [[ "$mode" == "v6" ]]; then inbound="$(echo "$inbound" | jq '.listen="::"')"; fi
+  if [[ "$mode" == "v6" ]]; then
+    inbound="$(echo "$inbound" | jq '.listen="::"')"
+  fi
 
-  json_append_inbound_xray "$inbound"
+  # ✅ 写入 Xray 配置
+  local tmp="/tmp/xray_cfg_$$.json"
+  jq --argjson o "$inbound" '.inbounds += [$o]' "$XRAY_CFG" >"$tmp"
+  if [[ $? -ne 0 ]]; then
+    err "写入 /etc/xray/config.json 失败，已回滚配置"
+    cp -a "$bak" "$XRAY_CFG"
+    rm -f "$tmp"
+    set -e
+    return 1
+  fi
+  mv "$tmp" "$XRAY_CFG"
+
+  # ✅ 关键：写完后先测试配置（防止 Xray 重启炸）
+  $XRAY_BIN run -test -config "$XRAY_CFG" >/dev/null 2>&1
+  if [[ $? -ne 0 ]]; then
+    err "Xray 配置测试失败（已回滚），请检查 Reality 生成逻辑"
+    cp -a "$bak" "$XRAY_CFG"
+    set -e
+    return 1
+  fi
+
+  # ✅ 放行端口 + 重启
   open_port "$port" "tcp"
+  systemctl restart xray >/dev/null 2>&1
 
+  # ✅ 写入 meta（用于导出链接）
   tmp="$(mktemp)"
   jq --arg tag "$tag" --arg name "$name" --arg proto "vless-reality" --arg uuid "$uuid" \
      --arg port "$port" --arg sni "$sni" --arg sid "$sid" --arg pbk "$pub" --arg flow "$flow" \
      '.xray_inbounds += [{
         "tag":$tag,"name":$name,"proto":$proto,"uuid":$uuid,
         "port":($port|tonumber),"sni":$sni,"sid":$sid,"pbk":$pbk,"flow":$flow
-      }]' "$META_JSON" >"$tmp"
-  mv "$tmp" "$META_JSON"
+      }]' "$META_JSON" >"$tmp" && mv "$tmp" "$META_JSON"
 
-  svc_restart xray
   ok "已添加 VLESS+Reality：$name 端口 $port"
   export_links_one "$tag"
+
+  set -e
+  return 0
 }
 
 add_vmess_ws_notls(){
