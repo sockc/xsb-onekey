@@ -11,7 +11,7 @@
 ## 🚀 一键安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh) --force
+bash <(curl -fsSL https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh) --force && xsb
 ```
 ```bash
 xsb
