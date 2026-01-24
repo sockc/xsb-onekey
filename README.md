@@ -13,6 +13,7 @@
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh) --force && xsb
 ```
+快捷菜单
 ```bash
 xsb
 
