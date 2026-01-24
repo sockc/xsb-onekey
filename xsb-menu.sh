@@ -535,14 +535,31 @@ delete_inbound(){
 
 # --------- Add inbounds (Xray) ----------
 add_vless_reality(){
+  set +e  # Reality 内部失败不要杀整个脚本
+
+  local name port sni sid flow uuid
+  read -rp "入站备注名（例如 US-Reality）: " name
+  [[ -n "$name" ]] || name="Reality-$(date +%m%d%H%M)"
+
+  read -rp "监听端口（回车随机 20000-50000）: " port
+  [[ -n "$port" ]] || port="$((20000 + RANDOM % 30000))"
+
+  read -rp "Reality SNI（默认 www.cloudflare.com）: " sni
+  [[ -n "$sni" ]] || sni="www.cloudflare.com"
+
+  read -rp "shortId（回车随机 8字节hex）: " sid
+  [[ -n "$sid" ]] || sid="$(rand_hex 8)"
+
+  read -rp "flow（默认 xtls-rprx-vision，可空）: " flow
+  [[ -n "$flow" ]] || flow="xtls-rprx-vision"
+
+  uuid="$(rand_uuid)"
+
   # ✅ 生成 Reality keypair（兼容新版 xray x25519：可能不输出 PublicKey）
   local xout priv pub
   xout="$($XRAY_BIN x25519 2>/dev/null || true)"
 
-  # 兼容输出：Private key / PrivateKey
   priv="$(echo "$xout" | grep -Ei 'private[ _-]*key' | head -n1 | sed -E 's/.*:[[:space:]]*//' | tr -d '\r')"
-
-  # 兼容输出：Public key / PublicKey（老版本可能有）
   pub="$(echo "$xout"  | grep -Ei 'public[ _-]*key'  | head -n1 | sed -E 's/.*:[[:space:]]*//' | tr -d '\r')"
 
   # ✅ 新版没给 PublicKey：用 priv 算 pub（需要 python3-cryptography）
@@ -580,7 +597,8 @@ PY
     set -e
     return 1
   fi
-local tag="xray-${name// /_}-reality-${port}"
+
+  local tag="xray-${name// /_}-reality-${port}"
 
   # ✅ 先备份配置，后写入（失败可回滚）
   local bak="/etc/xray/config.json.bak.$(date +%F-%H%M%S)"
@@ -648,20 +666,19 @@ local tag="xray-${name// /_}-reality-${port}"
   fi
   mv "$tmp" "$XRAY_CFG"
 
-  # ✅ 关键：写完后先测试配置（防止 Xray 重启炸）
+  # ✅ 写完先测试配置，防止重启炸
   $XRAY_BIN run -test -config "$XRAY_CFG" >/dev/null 2>&1
   if [[ $? -ne 0 ]]; then
-    err "Xray 配置测试失败（已回滚），请检查 Reality 生成逻辑"
+    err "Xray 配置测试失败（已回滚），请检查参数/生成逻辑"
     cp -a "$bak" "$XRAY_CFG"
     set -e
     return 1
   fi
 
-  # ✅ 放行端口 + 重启
   open_port "$port" "tcp"
   systemctl restart xray >/dev/null 2>&1
 
-  # ✅ 写入 meta（用于导出链接）
+  # ✅ 写入 meta（导出链接用）
   tmp="$(mktemp)"
   jq --arg tag "$tag" --arg name "$name" --arg proto "vless-reality" --arg uuid "$uuid" \
      --arg port "$port" --arg sni "$sni" --arg sid "$sid" --arg pbk "$pub" --arg flow "$flow" \
