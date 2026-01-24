@@ -1,184 +1,269 @@
-# XSB OneKey Manager（xsb-onekey）
+XSB OneKey（Xray + sing-box 一键部署 / 多协议自由组合）
 
-一个 **面向多协议、多机器、多系统** 的一键部署工具：  
-同时管理 **Xray + sing-box**，支持你自由组合协议，而不是只给固定几套模板。
+一个面向 VPS 多国家节点 场景的轻量一键脚本：
+✅ 你可以自由选择并组合协议（Reality / VMess / TUIC / HY2 等），并生成可用的客户端配置/链接。
+✅ 同时兼顾 标准 Linux 与 OpenWrt Tiny 最小化模式（省空间、省依赖）。
 
-> ✅ 适合：多国家 VPS、线路不稳定/需要免流、纯 IPv6、AMD/ARM 混搭部署  
-> ✅ 目标：一套脚本搞定所有节点的安装、添加、导出、维护与防火墙
+✨ 特性
+✅ 自由选择协议组合（不是固定套餐）
 
----
+VLESS + Reality（Xray）
 
-## 🚀 一键安装
+自动生成 Keypair（含 PublicKey / pbk）
 
+支持自定义 SNI / shortId / flow
+
+VMess + WS (noTLS)（Xray）
+
+path 支持自定义或随机
+
+Host 支持伪装域名（可空）
+
+VMess + TCP + HTTP（Xray）
+
+适合部分线路/免流/特殊环境（按需启用）
+
+TUIC（sing-box）
+
+自动生成自签证书（可用 allow_insecure/insecure）
+
+自动生成分享链接
+
+Hysteria2 / HY2（sing-box）
+
+自动生成自签证书
+
+自动生成分享链接
+
+你可以只装 Xray / 只装 sing-box / 两者都装，按需启用，不强行全家桶。
+
+⚡ 快速开始（推荐）
+方式 1：强制覆盖安装 + 直接进入菜单
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh) --force && xsb
 ```
-快捷菜单
+方式 2：普通安装
 ```bash
-xsb
+bash <(curl -fsSL https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh)
+```
+OpenWrt（Tiny 自动识别）
+
+同一条命令即可：
+```bash
+sh -c "$(wget -qO- https://raw.githubusercontent.com/vinchi008/1234xsb-onekey-/main/install.sh)" -- --menu
+```
+拉取最新
+```bash
+sh -c "$(wget -O- https://raw.githubusercontent.com/vinchi008/1234xsb-onekey-/main/install.sh)" -- --menu
 
 ```
-✨ 支持的协议
-Xray（TCP 系）
+
+Alpine（Lite 自动识别）
+```bash
+wget -qO- https://raw.githubusercontent.com/vinchi008/1234xsb-onekey-/main/install.sh | bash -s -- --force --menu
+```
+安装完成后运行：
+```bash
+xsb
+```
+🧩 脚本做了什么？
+
+自动安装并管理：
+
+xray-core（提供 Reality / VMess 等）
+
+sing-box（提供 TUIC / HY2 等）
+
+配置落地到系统标准目录
+
+Xray：/etc/xray/config.json
+
+sing-box：/etc/sing-box/config.json
+
+XSB 管理目录：/etc/xsb/
+
+自动生成：
+
+Reality pbk（PublicKey）
+
+path、UUID、密码等必要参数
+
+分享链接（Reality / HY2 / TUIC）
+
+🖥️ 支持系统 & 架构
+Linux（推荐）
+
+Ubuntu / Debian / CentOS / Rocky / Alma / Fedora 等（常见发行版均可）
+
+OpenWrt（Tiny 最小化模式）
+
+适合存储小、内存小的路由设备
+
+尽可能少依赖，按需安装
+
+架构
+
+amd64 / x86_64
+
+arm64 / aarch64
+
+其他架构按系统源与二进制可用性为准（OpenWrt 会走 Tiny 模式）
+
+📌 使用说明（菜单功能）
+
+安装后运行：
+```bash
+xsb
+```
+
+你会看到类似的菜单入口（不同版本略有差异）：
+
+1) 安装/重置组件
+
+安装 xray
+
+安装 sing-box
+
+两者都装
+
+2) 添加入站（自由组合）
 
 VLESS + Reality
 
-VMess + WS（noTLS）
+VMess + WS (noTLS)
 
-VMess + TCP + HTTP（支持自定义/随机 path）
-
-sing-box（UDP 系）
+VMess + TCP + HTTP
 
 TUIC
 
-Hysteria2（HY2）
+Hysteria2 (HY2)
 
-说明：
+添加成功会输出分享链接或关键参数（Reality 会输出 pbk）
 
-Reality 支持自定义 SNI / shortId / flow
+3) 服务管理
 
-VMess WS 支持自定义 Host / path（可免流场景使用）
+重启服务
 
-TUIC / HY2 默认使用自签证书，客户端需要开启 allow_insecure / insecure
+查看状态
 
-🧠 设计原则
-✅ 1）自由组合协议
+监听检查（如果系统支持 ss/netstat）
 
-你可以在同一台 VPS 上同时跑 Reality / VMess / TUIC / HY2
-也可以只装其中任意协议组合，不被“固定套餐”绑架。
+4) 删除入站（按备注名）
 
-✅ 2）标准目录 & systemd 管理
+删除 sing-box 入站
 
-Xray 配置：/etc/xray/config.json
+删除 xray 入站
 
-sing-box 配置：/etc/sing-box/config.json
+🔥 OpenWrt Tiny 模式说明
 
-元数据（节点信息/导出）：/var/lib/xsb/meta.json
+如果脚本检测到你在 OpenWrt，会自动进入 Tiny 模式，主打：
+✅ 最小化安装 ✅ 少依赖 ✅ 小存储也能跑
 
-服务文件：
+Tiny 模式下：
 
-/etc/systemd/system/xray.service
+可选安装 sing-box-tiny / xray-core
 
-/etc/systemd/system/sing-box.service
+自动生成 /etc/init.d/xray、/etc/init.d/sing-box（若缺失）
 
-✅ 3）兼容 AMD / ARM
+生成配置到标准路径
 
-自动识别架构下载最新版：
+支持 Reality / TUIC / HY2 的快速添加
 
-amd64
+注意：HY2 / TUIC 走 UDP，如果外网不通，优先检查 上游云防火墙/安全组是否放行 UDP 端口。
 
-arm64
+🔗 分享链接说明
+Reality（VLESS）
 
-armv7
+脚本会输出类似：
+```bash
+vless://UUID@IP:PORT?encryption=none&security=reality&sni=xxx&fp=chrome&pbk=PUBLICKEY&sid=SHORTID&type=tcp&flow=xtls-rprx-vision#remark
+```
 
-📦 功能一览（菜单能力）
-安装与维护
+如果出现内网 IP（如 192.168.x.x），说明机器在 NAT 后面，需要：
 
-✅ 一键安装/初始化（Xray + sing-box）
+改成公网 IP/域名
 
-✅ 更新核心（Xray / sing-box）
+或在上级路由/光猫做端口转发
 
-✅ 备份 / 恢复配置
+HY2（Hysteria2）
 
-✅ 查看日志（systemd journal）
+脚本会输出类似：
+```bash
+hysteria2://PASSWORD@IP:PORT/?insecure=1&sni=xsb-openwrt#remark
+```
 
-节点管理
+✅ 自签证书必须 insecure=1
+✅ HY2 属于 UDP 协议，记得放行 UDP 端口
 
-✅ 自由添加入站（按协议选择）
+TUIC
 
-✅ 列出/删除入站
+脚本会输出类似：
+```bash
+tuic://UUID:PASSWORD@IP:PORT?congestion_control=bbr&alpn=h3&sni=xsb-openwrt&allow_insecure=1#remark
+```
 
-✅ 导出链接 / 配置 / 二维码（qrencode 可用时）
+同样属于 UDP，且自签证书需允许不安全证书。
 
-✅ 节点体检：服务状态、监听端口检查
+🧱 防火墙与端口说明
 
-✅ 延迟检测（轻量本机测试）
+不同系统防火墙不同，常见情况：
 
-防火墙（UFW）
+OpenWrt：使用 UCI firewall，需要放行 UDP/TCP 端口
 
-✅ 一键启用/关闭 UFW
+VPS 云平台：可能还有 安全组/云防火墙，一定要同步放行
 
-✅ 自动识别并放行 SSH 端口（避免锁门）
+常见排障思路（HY2/TUIC 不通）
 
-✅ 自动放行脚本创建的所有节点端口
+服务是否运行？
 
-✅ 自定义放行端口 / 关闭端口规则
+端口是否监听？
 
-✅ 查看当前已放行端口
+OpenWrt firewall 是否放行？
 
-⚠️ 注意：如果你使用云服务器，还需要同时放行云厂商安全组端口。
+云平台安全组是否放行 UDP？
 
-🛠 使用示例
-添加 VLESS + Reality
+是否 NAT/内网导致外网访问不到？
 
-进入菜单后选择：
+🧯 常见问题（FAQ）
+Q1：Reality 通，HY2 不通？
 
-添加入站 → VLESS + Reality
+HY2 是 UDP，Reality 是 TCP。大概率是：
 
-填入 SNI（可用于伪装/免流场景）
+云防火墙/安全组没放行 UDP
 
-自动生成 keypair 并导出链接
+OpenWrt 防火墙没放行 UDP
 
-添加 VMess WS（noTLS）
+NAT 环境没做 UDP 转发
 
-进入菜单后选择：
+Q2：安装后提示找不到 xsb？
 
-添加入站 → VMess + WS (noTLS)
+重新打开终端，或执行：
 
-支持自定义 path / Host
+hash -r
 
-添加 VMess TCP + HTTP
+Q3：VMess/WS 提示 deprecated？
 
-进入菜单后选择：
+Xray 对 VMess/WS 的确会提示弃用警告，这是上游提示，不影响当前使用。
+你也可以逐步迁移到更推荐的组合（例如 Reality 或更新传输层）。
 
-添加入站 → VMess + TCP + HTTP
+🧹 卸载
 
-支持自定义 path / Host
+如果你在 Tiny/OpenWrt 菜单内启用了卸载功能，可直接菜单卸载。
+标准 Linux 下可按需删除：
 
-添加 TUIC / HY2
+Xray 配置：/etc/xray/
 
-进入菜单后选择：
+sing-box 配置：/etc/sing-box/
 
-添加入站 → TUIC 或 Hysteria2
+XSB 目录：/etc/xsb/
 
-自动生成自签证书与导出配置
-
-✅ 常见问题（FAQ）
-1）节点不通怎么办？
-
-按顺序排查：
-
-systemctl status xray --no-pager -l
-
-systemctl status sing-box --no-pager -l
-
-ss -lntp | grep xray / ss -lnup | grep sing-box
-
-云安全组是否放行端口（TCP/UDP）
-
-2）Reality 生成失败？
-
-脚本已兼容新版 xray x25519 输出格式。
-如果你的系统缺少依赖，会自动安装 python3-cryptography 用于计算 PublicKey。
-
-3）TUIC / HY2 客户端无法连接？
-
-默认自签证书，请在客户端开启：
-
-allow_insecure = true
-
-insecure = true
-
-🔥 推荐部署策略（多 VPS 多线路）
-
-线路好 / 稳定：Reality + TUIC
-
-需要伪装/免流：VMess WS(noTLS) + 自定义 Host/path
-
-纯 IPv6 机器：Reality + VMess TCP HTTP
-
-UDP 可能不稳：主推 Reality + TCP 方案兜底
+以及 systemd 服务/二进制文件（视安装方式而定）。
 
 📌 免责声明
 
-本项目仅供学习、研究与合法用途。请遵守当地法律法规，作者不对任何滥用行为负责
+本项目仅用于学习研究与合法用途，请遵守当地法律法规。
+请勿用于任何非法用途或违反服务条款的场景。
+
+⭐ Star
+
+如果这个项目对你有帮助，欢迎点个 Star 支持一下 🙌
