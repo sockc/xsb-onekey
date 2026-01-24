@@ -535,30 +535,45 @@ delete_inbound(){
 
 # --------- Add inbounds (Xray) ----------
 add_vless_reality(){
-  set +e  # ✅ 关键：Reality 内部失败不要直接杀掉整个脚本
-  local name port sni sid flow
-  read -rp "入站备注名（例如 US-Reality）: " name
-  [[ -n "$name" ]] || name="Reality-$(date +%m%d%H%M)"
-  read -rp "监听端口（回车随机 20000-50000）: " port
-  [[ -n "$port" ]] || port="$((20000 + RANDOM % 30000))"
-  read -rp "Reality SNI（默认 www.cloudflare.com）: " sni
-  [[ -n "$sni" ]] || sni="www.cloudflare.com"
-  read -rp "shortId（回车随机 8字节hex）: " sid
-  [[ -n "$sid" ]] || sid="$(rand_hex 8)"
-  read -rp "flow（默认 xtls-rprx-vision，可空）: " flow
-  [[ -n "$flow" ]] || flow="xtls-rprx-vision"
-
-  local uuid
-  uuid="$(rand_uuid)"
-
-  # ✅ 生成 Reality keypair（最稳解析 + 强校验）
+  # ✅ 生成 Reality keypair（兼容新版 xray x25519：可能不输出 PublicKey）
   local xout priv pub
-  xout="$($XRAY_BIN x25519 2>/dev/null)"
-  priv="$(echo "$xout" | grep -i 'private' | head -n1 | sed -E 's/.*:[[:space:]]*//' | tr -d '\r')"
-  pub="$(echo "$xout"  | grep -i 'public'  | head -n1 | sed -E 's/.*:[[:space:]]*//' | tr -d '\r')"
+  xout="$($XRAY_BIN x25519 2>/dev/null || true)"
+
+  # 兼容输出：Private key / PrivateKey
+  priv="$(echo "$xout" | grep -Ei 'private[ _-]*key' | head -n1 | sed -E 's/.*:[[:space:]]*//' | tr -d '\r')"
+
+  # 兼容输出：Public key / PublicKey（老版本可能有）
+  pub="$(echo "$xout"  | grep -Ei 'public[ _-]*key'  | head -n1 | sed -E 's/.*:[[:space:]]*//' | tr -d '\r')"
+
+  # ✅ 新版没给 PublicKey：用 priv 算 pub（需要 python3-cryptography）
+  if [[ -n "$priv" && -z "$pub" ]]; then
+    if ! python3 -c "import cryptography" >/dev/null 2>&1; then
+      warn "缺少 python3-cryptography，正在安装..."
+      if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y python3-cryptography >/dev/null 2>&1
+      elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y python3-cryptography >/dev/null 2>&1
+      elif command -v yum >/dev/null 2>&1; then
+        yum install -y python3-cryptography >/dev/null 2>&1
+      fi
+    fi
+
+    pub="$(python3 - <<PY 2>/dev/null
+import base64
+from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+priv_b64u="$priv"
+raw = base64.urlsafe_b64decode(priv_b64u + "==")
+priv = x25519.X25519PrivateKey.from_private_bytes(raw)
+pub = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+print(base64.urlsafe_b64encode(pub).decode().rstrip("="))
+PY
+)"
+  fi
 
   if [[ -z "$priv" || -z "$pub" ]]; then
-    err "Reality keypair 生成失败（解析不到 key），已阻止写入配置，避免 Xray 崩溃"
+    err "Reality keypair 生成失败：priv/pub 为空（请确认 python3-cryptography 安装成功）"
     echo "---- xray x25519 原始输出 ----"
     echo "$xout"
     echo "-----------------------------"
@@ -566,7 +581,6 @@ add_vless_reality(){
     return 1
   fi
 
-  local tag="xray-${name// /_}-reality-${port}"
 
   # ✅ 先备份配置，后写入（失败可回滚）
   local bak="/etc/xray/config.json.bak.$(date +%F-%H%M%S)"
