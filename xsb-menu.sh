@@ -245,25 +245,8 @@ open_port(){
 }
 
 # =========================
-# Firewall (UFW) - XSB Sync
+# Firewall (UFW) - XSB Suite
 # =========================
-
-detect_ssh_port(){
-  local p=""
-  # 从 sshd_config 读取（优先）
-  if [[ -f /etc/ssh/sshd_config ]]; then
-    p="$(grep -E '^\s*Port\s+' /etc/ssh/sshd_config | tail -n1 | awk '{print $2}' | tr -d '\r')"
-  fi
-
-  # 兜底：从监听里找 sshd
-  if [[ -z "$p" ]]; then
-    p="$(ss -lntp 2>/dev/null | awk '/sshd/ {print $4}' | tail -n1 | awk -F: '{print $NF}' | tr -d '\r')"
-  fi
-
-  # 再兜底：22
-  [[ -n "$p" ]] || p="22"
-  echo "$p"
-}
 
 fw_install_ufw(){
   if command -v ufw >/dev/null 2>&1; then return 0; fi
@@ -273,10 +256,8 @@ fw_install_ufw(){
     apt-get install -y ufw >/dev/null 2>&1
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y ufw >/dev/null 2>&1
-    systemctl enable --now ufw >/dev/null 2>&1 || true
   elif command -v yum >/dev/null 2>&1; then
     yum install -y ufw >/dev/null 2>&1
-    systemctl enable --now ufw >/dev/null 2>&1 || true
   else
     err "无法自动安装 ufw（请手动安装）"
     return 1
@@ -284,61 +265,225 @@ fw_install_ufw(){
   ok "UFW 已安装"
 }
 
-fw_allow(){
-  local port="$1" proto="$2" note="${3:-}"
-  [[ -n "$port" && -n "$proto" ]] || return 0
-  ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
-  [[ -n "$note" ]] && echo -e "  + 放行 ${port}/${proto}  ${note}"
+detect_ssh_port(){
+  local p=""
+  if [[ -f /etc/ssh/sshd_config ]]; then
+    p="$(grep -E '^\s*Port\s+' /etc/ssh/sshd_config | tail -n1 | awk '{print $2}' | tr -d '\r')"
+  fi
+  if [[ -z "$p" ]]; then
+    p="$(ss -lntp 2>/dev/null | awk '/sshd/ {print $4}' | tail -n1 | awk -F: '{print $NF}' | tr -d '\r')"
+  fi
+  [[ -n "$p" ]] || p="22"
+  echo "$p"
 }
 
-fw_sync_from_meta(){
-  init_meta
+fw_is_enabled(){
+  command -v ufw >/dev/null 2>&1 || return 1
+  ufw status 2>/dev/null | head -n1 | grep -qi "Status: active"
+}
 
+fw_enable(){
   fw_install_ufw || return 1
+  info "启用 UFW..."
+  ufw --force enable >/dev/null 2>&1 || true
+  ok "UFW 已启用 ✅"
+}
 
+fw_disable(){
+  if ! command -v ufw >/dev/null 2>&1; then
+    warn "未安装 ufw"
+    return 0
+  fi
+  info "关闭 UFW..."
+  ufw --force disable >/dev/null 2>&1 || true
+  ok "UFW 已关闭 ✅"
+}
+
+fw_reset_safe(){
+  fw_install_ufw || return 1
   local ssh_port
   ssh_port="$(detect_ssh_port)"
 
-  info "配置 UFW 默认策略..."
+  warn "将重置 UFW 规则（reset）"
   ufw --force reset >/dev/null 2>&1 || true
   ufw default deny incoming >/dev/null 2>&1 || true
   ufw default allow outgoing >/dev/null 2>&1 || true
 
-  info "放行 SSH 端口：${ssh_port}/tcp"
-  fw_allow "$ssh_port" "tcp" "(SSH)"
+  # 永远先放行 SSH，避免锁门外
+  ufw allow "${ssh_port}/tcp" >/dev/null 2>&1 || true
+  ok "已重置并放行 SSH：${ssh_port}/tcp"
+}
+
+fw_allow(){
+  local port="$1" proto="$2"
+  [[ -n "$port" && -n "$proto" ]] || return 1
+  ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+  ok "已放行：${port}/${proto}"
+}
+
+fw_deny(){
+  local port="$1" proto="$2"
+  [[ -n "$port" && -n "$proto" ]] || return 1
+  # deny 会新增拒绝规则；delete allow 才是真正删
+  ufw deny "${port}/${proto}" >/dev/null 2>&1 || true
+  ok "已拒绝：${port}/${proto}"
+}
+
+fw_delete_rule(){
+  # 删除规则更“干净”，不叠加 deny
+  local port="$1" proto="$2" action="${3:-allow}"
+  [[ -n "$port" && -n "$proto" ]] || return 1
+  ufw --force delete "$action" "${port}/${proto}" >/dev/null 2>&1 || true
+  ok "已删除规则：delete ${action} ${port}/${proto}"
+}
+
+fw_list_allowed_ports(){
+  if ! command -v ufw >/dev/null 2>&1; then
+    warn "未安装 ufw"
+    return 0
+  fi
+
+  echo -e "${BLU}--- 当前已放行（简表）---${RST}"
+  # 解析示例：27352/tcp ALLOW IN Anywhere
+  ufw status numbered 2>/dev/null \
+    | sed -n 's/^\[\([0-9]\+\)\][[:space:]]\+\([^ ]\+\)[[:space:]]\+ALLOW IN.*$/\1) \2/p' \
+    | sort -V || true
+  echo
+  echo -e "${CYA}提示：想看全部细节用 “详细状态”${RST}"
+}
+
+fw_status_verbose(){
+  if ! command -v ufw >/dev/null 2>&1; then
+    warn "未安装 ufw"
+    return 0
+  fi
+  ufw status verbose || true
+}
+
+fw_sync_from_meta(){
+  fw_install_ufw || return 1
+  init_meta
+
+  # 不强制 reset：只做“增量放行”
+  local ssh_port
+  ssh_port="$(detect_ssh_port)"
+
+  # 如果 UFW 还没启用，先设置默认策略并启用
+  if ! fw_is_enabled; then
+    info "UFW 未启用，设置默认策略并启用"
+    ufw default deny incoming >/dev/null 2>&1 || true
+    ufw default allow outgoing >/dev/null 2>&1 || true
+    ufw --force enable >/dev/null 2>&1 || true
+  fi
+
+  # 保底：放行 SSH
+  ufw allow "${ssh_port}/tcp" >/dev/null 2>&1 || true
 
   info "同步放行 Xray 入站端口（TCP）..."
   jq -r '.xray_inbounds[]? | "\(.port)\t\(.proto)\t\(.name)"' "$META_JSON" 2>/dev/null \
   | while IFS=$'\t' read -r port proto name; do
-      # xray 这几个都是 TCP
-      fw_allow "$port" "tcp" "(${proto} ${name})"
+      ufw allow "${port}/tcp" >/dev/null 2>&1 || true
     done
 
   info "同步放行 sing-box 入站端口（按协议）..."
   jq -r '.singbox_inbounds[]? | "\(.port)\t\(.proto)\t\(.name)"' "$META_JSON" 2>/dev/null \
   | while IFS=$'\t' read -r port proto name; do
       case "$proto" in
-        tuic|hy2) fw_allow "$port" "udp" "(${proto} ${name})" ;;
-        *)        fw_allow "$port" "tcp" "(${proto} ${name})" ;; # 兜底
+        tuic|hy2) ufw allow "${port}/udp" >/dev/null 2>&1 || true ;;
+        *)        ufw allow "${port}/tcp" >/dev/null 2>&1 || true ;;
       esac
     done
 
-  info "启用 UFW..."
-  ufw --force enable >/dev/null 2>&1 || true
-
-  ok "UFW 已启用并完成规则同步 ✅"
-  echo
-  ufw status verbose
-  echo
-  warn "提醒：云厂商安全组/ACL 也要放行对应端口，否则 UFW 放了外面也进不来。"
+  ok "已同步放行：SSH + 所有节点端口 ✅"
 }
 
-fw_status(){
-  if ! command -v ufw >/dev/null 2>&1; then
-    warn "未安装 ufw"
-    return 0
+fw_custom_allow_menu(){
+  fw_install_ufw || return 1
+  read -rp "输入端口（例如 443 或 10000:20000）： " port
+  [[ -n "$port" ]] || { warn "未输入端口"; return 0; }
+
+  echo "选择协议："
+  echo "1) TCP"
+  echo "2) UDP"
+  echo "3) TCP+UDP"
+  read -rp "选择 [1-3]: " p
+  case "$p" in
+    1) fw_allow "$port" "tcp" ;;
+    2) fw_allow "$port" "udp" ;;
+    3) fw_allow "$port" "tcp"; fw_allow "$port" "udp" ;;
+    *) warn "无效选择" ;;
+  esac
+}
+
+fw_custom_close_menu(){
+  fw_install_ufw || return 1
+  read -rp "输入端口（例如 443 或 10000:20000）： " port
+  [[ -n "$port" ]] || { warn "未输入端口"; return 0; }
+
+  echo "怎么关闭："
+  echo "1) 删除 allow 规则（推荐）"
+  echo "2) 添加 deny 规则（不推荐，规则会叠加）"
+  read -rp "选择 [1-2]: " how
+
+  echo "选择协议："
+  echo "1) TCP"
+  echo "2) UDP"
+  echo "3) TCP+UDP"
+  read -rp "选择 [1-3]: " p
+
+  if [[ "$how" == "1" ]]; then
+    case "$p" in
+      1) fw_delete_rule "$port" "tcp" "allow" ;;
+      2) fw_delete_rule "$port" "udp" "allow" ;;
+      3) fw_delete_rule "$port" "tcp" "allow"; fw_delete_rule "$port" "udp" "allow" ;;
+      *) warn "无效选择" ;;
+    esac
+  else
+    case "$p" in
+      1) fw_deny "$port" "tcp" ;;
+      2) fw_deny "$port" "udp" ;;
+      3) fw_deny "$port" "tcp"; fw_deny "$port" "udp" ;;
+      *) warn "无效选择" ;;
+    esac
   fi
-  ufw status verbose || true
+}
+
+firewall_menu(){
+  while true; do
+    echo
+    echo -e "${BLU}==============================${RST}"
+    echo -e "${BLU}      UFW 防火墙菜单          ${RST}"
+    echo -e "${BLU}==============================${RST}"
+    if fw_is_enabled; then
+      echo -e "状态：${GRN}已启用(active)${RST}"
+    else
+      echo -e "状态：${YLW}未启用(inactive)${RST}"
+    fi
+    echo
+    echo "1) 启用 UFW"
+    echo "2) 关闭 UFW"
+    echo "3) 重置规则（自动放行 SSH）"
+    echo "4) 同步放行（SSH + 所有节点端口）"
+    echo "5) 自定义放行端口"
+    echo "6) 关闭/删除端口规则"
+    echo "7) 查看已放行端口（简表）"
+    echo "8) 查看 UFW 详细状态"
+    echo "0) 返回"
+    echo
+    read -rp "选择: " c
+    case "$c" in
+      1) fw_enable ;;
+      2) fw_disable ;;
+      3) fw_reset_safe ;;
+      4) fw_sync_from_meta ;;
+      5) fw_custom_allow_menu ;;
+      6) fw_custom_close_menu ;;
+      7) fw_list_allowed_ports ;;
+      8) fw_status_verbose ;;
+      0) return 0 ;;
+      *) warn "无效选项" ;;
+    esac
+  done
 }
 
 # --------- Meta ----------
@@ -1351,7 +1496,7 @@ main_menu(){
     echo "11) 更新核心（Xray/sing-box）"
     echo "12) 备份"
     echo "13) 恢复"
-    echo "14) 防火墙(UFW)：自动放行SSH + 节点端口"
+    echo "14) 防火墙(UFW) 管理"
     echo "15) 查看UFW状态"
     echo "0) 卸载并退出"
     echo
@@ -1370,7 +1515,7 @@ main_menu(){
       11) update_core ;;
       12) backup_all ;;
       13) restore_all ;;
-      14) fw_sync_from_meta ;;
+      14) firewall_menu ;;
       15) fw_status ;;
       0) uninstall_all; exit 0 ;;
       *) warn "无效选项" ;;
