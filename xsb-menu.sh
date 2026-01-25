@@ -1745,6 +1745,26 @@ uninstall_xsb() {
   ok "XSB 已卸载完成 ✅"
   exit 0
 }
+fw_status() {
+  echo
+  echo "=============================="
+  echo " UFW 状态"
+  echo "=============================="
+
+  if ! command -v ufw >/dev/null 2>&1; then
+    echo "❌ 未安装 ufw"
+    echo "建议执行：apt-get update -y && apt-get install -y ufw"
+    return 0
+  fi
+
+  echo
+  echo ">>> ufw status verbose"
+  ufw status verbose || true
+
+  echo
+  echo ">>> ufw status numbered"
+  ufw status numbered || true
+}
 
 need_root
 init_meta
