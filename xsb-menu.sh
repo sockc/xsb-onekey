@@ -1519,6 +1519,7 @@ main_menu(){
       13) restore_all ;;
       14) firewall_menu ;;
       15) fw_status ;;
+      16) mihomo_menu ;;
       0) return 0 ;;          # 或 exit 0，看你主菜单是函数还是主入口
       99) uninstall_xsb ;;
       *) warn "无效选项" ;;
