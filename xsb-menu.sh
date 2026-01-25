@@ -1498,7 +1498,7 @@ main_menu(){
     echo "13) 恢复"
     echo "14) 防火墙(UFW) 管理"
     echo "15) 查看UFW状态"
-    echo "16) Xray 出站接入 mihomo 分流
+    echo "16) Xray 出站接入 mihomo 分流"
     echo "0) 卸载并退出"
     echo
     read -rp "请选择: " c
