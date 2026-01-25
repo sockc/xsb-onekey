@@ -1499,7 +1499,8 @@ main_menu(){
     echo "14) 防火墙(UFW) 管理"
     echo "15) 查看UFW状态"
     echo "16) Xray 出站接入 mihomo 分流"
-    echo "0) 卸载并退出"
+    echo "0) 返回"
+    echo "99) 卸载 XSB（删除脚本/服务/配置）"
     echo
     read -rp "请选择: " c
     case "$c" in
@@ -1518,8 +1519,8 @@ main_menu(){
       13) restore_all ;;
       14) firewall_menu ;;
       15) fw_status ;;
-      16) mihomo_menu ;;
-      0) uninstall_all; exit 0 ;;
+      0) return 0 ;;          # 或 exit 0，看你主菜单是函数还是主入口
+      99) uninstall_xsb ;;
       *) warn "无效选项" ;;
     esac
   done
@@ -1716,6 +1717,32 @@ mihomo_menu() {
       *) warn "无效选项" ;;
     esac
   done
+}
+uninstall_xsb() {
+  echo
+  warn "即将卸载 XSB：会删除脚本、systemd 服务、配置文件"
+  echo "  - /usr/local/sbin/xsb"
+  echo "  - /usr/local/share/xsb/"
+  echo "  - /etc/xray/ /etc/sing-box/ /var/lib/xsb/"
+  echo
+  read -rp "输入 YES 确认卸载： " ans
+  [[ "$ans" == "YES" ]] || { warn "已取消"; return 0; }
+
+  # 停止服务（存在就停）
+  systemctl disable --now xray 2>/dev/null || true
+  systemctl disable --now sing-box 2>/dev/null || true
+  systemctl disable --now xsb-proxy 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+
+  # 删除脚本与目录
+  rm -f /usr/local/sbin/xsb 2>/dev/null || true
+  rm -rf /usr/local/share/xsb 2>/dev/null || true
+
+  # 删除配置（你不想删配置的话，把这几行注释掉即可）
+  rm -rf /etc/xray /etc/sing-box /var/lib/xsb 2>/dev/null || true
+
+  ok "XSB 已卸载完成 ✅"
+  exit 0
 }
 
 need_root
