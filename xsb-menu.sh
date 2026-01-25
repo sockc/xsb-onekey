@@ -1498,6 +1498,7 @@ main_menu(){
     echo "13) 恢复"
     echo "14) 防火墙(UFW) 管理"
     echo "15) 查看UFW状态"
+    echo "16) Xray 出站接入 mihomo 分流
     echo "0) 卸载并退出"
     echo
     read -rp "请选择: " c
@@ -1517,7 +1518,201 @@ main_menu(){
       13) restore_all ;;
       14) firewall_menu ;;
       15) fw_status ;;
+      16) mihomo_menu ;;
       0) uninstall_all; exit 0 ;;
+      *) warn "无效选项" ;;
+    esac
+  done
+}
+
+# =========================================================
+# Xray outbound via mihomo (Clash Meta) - menu addon
+# =========================================================
+
+XRAY_CFG="${XRAY_CFG:-/etc/xray/config.json}"
+
+port_listening() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntup 2>/dev/null | grep -qE "[:.]${p}\b" && return 0 || return 1
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -lntup 2>/dev/null | grep -qE "[:.]${p}\b" && return 0 || return 1
+  else
+    return 1
+  fi
+}
+
+mihomo_guess_port() {
+  # 优先 socks-port 7891，其次 mixed/http 7890
+  if port_listening 7891; then echo "7891"; return 0; fi
+  if port_listening 7890; then echo "7890"; return 0; fi
+  echo ""
+}
+
+mihomo_backup_cfg() {
+  local bak="/etc/xray/config.json.bak.mihomo.$(date +%F-%H%M%S)"
+  cp -a "$XRAY_CFG" "$bak"
+  ok "已备份：$bak"
+}
+
+mihomo_status() {
+  echo
+  echo "=== Xray → mihomo 出站状态 ==="
+  if [[ ! -f "$XRAY_CFG" ]]; then
+    err "未找到 $XRAY_CFG"
+    return 0
+  fi
+
+  local has_tag has_rule port proto
+  has_tag="$(jq -r '.outbounds[]?.tag // empty' "$XRAY_CFG" 2>/dev/null | grep -x "proxy_via_mihomo" || true)"
+  has_rule="$(jq -r '.routing.rules[]?.outboundTag // empty' "$XRAY_CFG" 2>/dev/null | grep -x "proxy_via_mihomo" || true)"
+  port="$(jq -r '.outbounds[]? | select(.tag=="proxy_via_mihomo") | .settings.servers[0].port // empty' "$XRAY_CFG" 2>/dev/null || true)"
+  proto="$(jq -r '.outbounds[]? | select(.tag=="proxy_via_mihomo") | .protocol // empty' "$XRAY_CFG" 2>/dev/null || true)"
+
+  if [[ -n "$has_tag" ]]; then
+    ok "已存在 outboundTag=proxy_via_mihomo（协议=$proto 端口=$port）"
+  else
+    warn "未配置 proxy_via_mihomo 出站"
+  fi
+
+  if [[ -n "$has_rule" ]]; then
+    ok "已存在 routing 默认规则 → proxy_via_mihomo"
+  else
+    warn "未设置 routing 默认规则（未接管出站）"
+  fi
+
+  echo
+  echo "mihomo 端口监听检测："
+  if port_listening 7891; then ok "7891 (常见 SOCKS5) 正在监听"; else warn "7891 未监听"; fi
+  if port_listening 7890; then ok "7890 (常见 HTTP/mixed) 正在监听"; else warn "7890 未监听"; fi
+  echo
+}
+
+mihomo_enable() {
+  [[ -f "$XRAY_CFG" ]] || { err "缺少 $XRAY_CFG"; return 1; }
+  command -v jq >/dev/null 2>&1 || { err "缺少 jq"; return 1; }
+
+  local auto_port port
+  auto_port="$(mihomo_guess_port || true)"
+
+  read -rp "mihomo 本地端口（回车自动检测 7891/7890）: " port
+  [[ -n "$port" ]] || port="$auto_port"
+
+  if [[ -z "$port" ]]; then
+    warn "未检测到 7891/7890 正在监听，仍可写入配置，但请先确保 mihomo 已启动"
+    port="7891"
+  fi
+
+  echo
+  echo "选择 mihomo 代理类型："
+  echo "1) SOCKS5（推荐：mihomo socks-port=7891 或 mixed-port）"
+  echo "2) HTTP   （mihomo port=7890）"
+  echo "0) 返回"
+  read -rp "选择: " t
+
+  local proto
+  case "$t" in
+    1) proto="socks" ;;
+    2) proto="http" ;;
+    0) return 0 ;;
+    *) warn "无效，默认 SOCKS5"; proto="socks" ;;
+  esac
+
+  mihomo_backup_cfg
+
+  # 写入/更新 outbounds + routing 默认规则
+  # 逻辑：
+  # - outbounds 中确保有 proxy_via_mihomo + direct
+  # - routing.rules 末尾增加“默认走 proxy_via_mihomo”（放最后当兜底）
+  # - 若已存在则更新端口/协议，不重复插入
+  local tmp
+  tmp="$(mktemp)"
+
+  jq \
+    --arg proto "$proto" \
+    --argjson port "$port" \
+    '
+    # 1) 保证 outbounds 是数组
+    .outbounds = (.outbounds // []) |
+
+    # 2) 保证 direct 存在
+    (if ([.outbounds[]?.tag] | index("direct")) == null then
+       .outbounds += [{"tag":"direct","protocol":"freedom","settings":{}}]
+     else . end) |
+
+    # 3) 插入或更新 proxy_via_mihomo
+    (if ([.outbounds[]?.tag] | index("proxy_via_mihomo")) == null then
+       .outbounds += [{
+         "tag":"proxy_via_mihomo",
+         "protocol":$proto,
+         "settings":{"servers":[{"address":"127.0.0.1","port":$port}]}
+       }]
+     else
+       .outbounds |= map(
+         if .tag=="proxy_via_mihomo" then
+           .protocol=$proto |
+           .settings.servers=[{"address":"127.0.0.1","port":$port}]
+         else . end
+       )
+     end) |
+
+    # 4) routing 结构保证存在
+    .routing = (.routing // {}) |
+    .routing.rules = (.routing.rules // []) |
+
+    # 5) 如果没有默认走 mihomo 的兜底规则，就追加到最后
+    (if ([.routing.rules[]? | select(.outboundTag?=="proxy_via_mihomo")] | length) == 0 then
+       .routing.rules += [{"type":"field","outboundTag":"proxy_via_mihomo"}]
+     else . end)
+    ' "$XRAY_CFG" >"$tmp" && mv "$tmp" "$XRAY_CFG"
+
+  ok "已写入：Xray 出站 → mihomo（$proto://127.0.0.1:$port）"
+
+  systemctl restart xray >/dev/null 2>&1 || true
+  systemctl status xray --no-pager -l | head -n 12 || true
+}
+
+mihomo_disable() {
+  [[ -f "$XRAY_CFG" ]] || { err "缺少 $XRAY_CFG"; return 1; }
+  command -v jq >/dev/null 2>&1 || { err "缺少 jq"; return 1; }
+
+  mihomo_backup_cfg
+
+  local tmp
+  tmp="$(mktemp)"
+
+  jq '
+    # 删除 outbound proxy_via_mihomo
+    .outbounds = (.outbounds // []) | .outbounds |= map(select(.tag!="proxy_via_mihomo")) |
+
+    # 删除 routing 中指向 proxy_via_mihomo 的兜底规则
+    .routing = (.routing // {}) |
+    .routing.rules = (.routing.rules // []) |
+    .routing.rules |= map(select(.outboundTag!="proxy_via_mihomo"))
+  ' "$XRAY_CFG" >"$tmp" && mv "$tmp" "$XRAY_CFG"
+
+  ok "已回滚：移除 Xray → mihomo 出站配置"
+
+  systemctl restart xray >/dev/null 2>&1 || true
+  systemctl status xray --no-pager -l | head -n 12 || true
+}
+
+mihomo_menu() {
+  while true; do
+    echo
+    echo "=============================="
+    echo " Xray 出站接入 mihomo 分流"
+    echo "=============================="
+    echo "1) 查看状态"
+    echo "2) 启用：Xray 出站 → mihomo"
+    echo "3) 回滚：恢复 Xray 原出站"
+    echo "0) 返回"
+    read -rp "选择: " c
+    case "$c" in
+      1) mihomo_status ;;
+      2) mihomo_enable ;;
+      3) mihomo_disable ;;
+      0) return 0 ;;
       *) warn "无效选项" ;;
     esac
   done
