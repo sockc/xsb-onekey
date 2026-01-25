@@ -1664,7 +1664,7 @@ mihomo_enable() {
 
     # 5) 如果没有默认走 mihomo 的兜底规则，就追加到最后
     (if ([.routing.rules[]? | select(.outboundTag?=="proxy_via_mihomo")] | length) == 0 then
-       .routing.rules += [{"type":"field","outboundTag":"proxy_via_mihomo"}]
+       .routing.rules += [{"type":"field","network":"tcp,udp","outboundTag":"proxy_via_mihomo"}]
      else . end)
     ' "$XRAY_CFG" >"$tmp" && mv "$tmp" "$XRAY_CFG"
 
