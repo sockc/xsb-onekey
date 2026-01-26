@@ -50,17 +50,17 @@ OpenWrt（Tiny 自动识别）
 
 同一条命令即可：
 ```bash
-sh -c "$(wget -qO- https://raw.githubusercontent.com/vinchi008/1234xsb-onekey-/main/install.sh)" -- --menu
+sh -c "$(wget -qO- https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh)" -- --menu
 ```
 拉取最新
 ```bash
-sh -c "$(wget -O- https://raw.githubusercontent.com/vinchi008/1234xsb-onekey-/main/install.sh)" -- --menu
+sh -c "$(wget -O- https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh)" -- --menu
 
 ```
 
 Alpine（Lite 自动识别）
 ```bash
-wget -qO- https://raw.githubusercontent.com/vinchi008/1234xsb-onekey-/main/install.sh | bash -s -- --force --menu
+wget -qO- https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh | bash -s -- --force --menu
 ```
 安装完成后运行：
 ```bash
