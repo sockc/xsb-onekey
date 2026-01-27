@@ -13,6 +13,93 @@ LINK_DIR="$XSB_DIR/links"
 
 msg(){ echo "[xsb-openwrt] $*" >&2; }
 
+# ===== Modules (persistent preferred) =====
+MOD_DIR="/etc/xsb/modules"
+MOD_TMP="/tmp/xsb/modules"
+MOD_BASE_URL="https://raw.githubusercontent.com/${REPO:-sockc/1234xsb-onekey-}/${REF:-main}/extras"
+
+dl(){
+  url="$1"; out="$2"
+  if command -v wget >/dev/null 2>&1; then
+    wget -qO "$out" "$url" && return 0
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$out" && return 0
+  fi
+  return 1
+}
+
+ensure_mod_dir(){
+  mkdir -p "$MOD_DIR" >/dev/null 2>&1 || true
+  [ -w "$MOD_DIR" ] || { mkdir -p "$MOD_TMP" >/dev/null 2>&1 || true; MOD_DIR="$MOD_TMP"; }
+}
+
+mod_fetch(){
+  f="$1"
+  ensure_mod_dir
+  dst="$MOD_DIR/$f"
+  [ -f "$dst" ] && return 0
+  url="$MOD_BASE_URL/$f"
+  msg "下载模块：$f"
+  dl "$url" "$dst" || { msg "❌ 模块下载失败：$url"; return 1; }
+  chmod +x "$dst" >/dev/null 2>&1 || true
+  return 0
+}
+
+mod_load(){
+  mod="$1"
+
+  repo="${REPO:-sockc/1234xsb-onekey-}"
+  ref="${REF:-main}"
+  base="https://raw.githubusercontent.com/${repo}/${ref}/extras"
+  url="$base/$mod"
+
+  mkdir -p /etc/xsb/modules /tmp/xsb/modules >/dev/null 2>&1 || true
+  local_file="/etc/xsb/modules/$mod"
+  tmp_file="/tmp/xsb/modules/$mod"
+
+  # 已缓存直接 source
+  if [ -f "$local_file" ]; then
+    . "$local_file" || return 1
+    return 0
+  fi
+
+  # 缺 CA 会导致 https 下载失败
+  opkg list-installed 2>/dev/null | grep -q "^ca-bundle " || {
+    opkg update >/dev/null 2>&1 || true
+    opkg install ca-bundle >/dev/null 2>&1 || true
+  }
+
+  msg "mod_load: $mod"
+  msg "URL: $url"
+
+  dl_ok=0
+  if command -v wget >/dev/null 2>&1; then
+    wget -qO "$tmp_file" "$url" 2>/tmp/xsb_mod_err.log && dl_ok=1 || dl_ok=0
+  fi
+  if [ "$dl_ok" -eq 0 ] && command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$tmp_file" 2>/tmp/xsb_mod_err.log && dl_ok=1 || dl_ok=0
+  fi
+
+  if [ "$dl_ok" -eq 0 ]; then
+    msg "❌ 下载失败：$url"
+    [ -s /tmp/xsb_mod_err.log ] && sed 's/^/[xsb-openwrt] /' /tmp/xsb_mod_err.log
+    return 1
+  fi
+
+  cp -a "$tmp_file" "$local_file" 2>/dev/null || true
+  chmod +x "$local_file" 2>/dev/null || true
+
+  # 关键：source 进当前 shell，失败要打印行号
+  if ! . "$local_file" 2>/tmp/xsb_mod_source_err.log; then
+    msg "❌ source 模块失败：$local_file"
+    [ -s /tmp/xsb_mod_source_err.log ] && sed 's/^/[xsb-openwrt] /' /tmp/xsb_mod_source_err.log
+    return 1
+  fi
+
+  return 0
+}
+
 # ==============================
 # Random utils
 # ==============================
@@ -1014,22 +1101,38 @@ main(){
     echo "=============================="
     echo " XSB OpenWrt Tiny Menu"
     echo "=============================="
+    echo " XSB OpenWrt Tiny Menu"
+    echo "=============================="
     echo "1) 安装 sing-box / xray"
     echo "2) 添加入站（Xray/sing-box）"
     echo "3) 查看分享链接"
     echo "4) 重启服务"
     echo "5) 查看状态"
-    echo "6) 卸载"
+    echo "6) 透明代理网关模式（国内直连/国外代理）"
+    echo "7) 卸载"
     echo "0) 退出"
     printf "选择: "
     read c
     case "$c" in
       1) install_menu ;;
       2) inbound_menu ;;
-      3) show_links ;;
+      3)
+        if mod_load "openwrt-mod-links.sh"; then
+          show_links
+        else
+          msg "❌ 加载链接模块失败"
+        fi
+        ;;
       4) svc_sb restart; svc_xr restart; msg "✅ 已重启" ;;
       5) status_all ;;
-      6) uninstall_menu ;;
+      6)
+        if mod_load "openwrt-mod-proxy.sh"; then
+          proxy_gateway_menu
+        else
+          msg "❌ 加载网关模块失败：openwrt-mod-proxy.sh"
+        fi
+        ;;
+      7) uninstall_menu ;;
       0) exit 0 ;;
       *) echo "无效选项" ;;
     esac
