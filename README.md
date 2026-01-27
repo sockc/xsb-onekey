@@ -40,27 +40,27 @@ Hysteria2 / HY2（sing-box）
 ⚡ 快速开始（推荐）
 方式 1：强制覆盖安装 + 直接进入菜单
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh) --force && xsb
+bash <(curl -fsSL https://raw.githubusercontent.com/sockc/xsb-onekey/main/install.sh) --force && xsb
 ```
 方式 2：普通安装
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/sockc/xsb-onekey/main/install.sh)
 ```
 OpenWrt（Tiny 自动识别）
 
 同一条命令即可：
 ```bash
-sh -c "$(wget -qO- https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh)" -- --menu
+sh -c "$(wget -qO- https://raw.githubusercontent.com/sockc/xsb-onekey/main/install.sh)" -- --menu
 ```
 拉取最新
 ```bash
-sh -c "$(wget -O- https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh)" -- --menu
+sh -c "$(wget -O- https://raw.githubusercontent.com/sockc/xsb-onekey/main/install.sh)" -- --menu
 
 ```
 
 Alpine（Lite 自动识别）
 ```bash
-wget -qO- https://raw.githubusercontent.com/vinchi008/xsb-onekey/main/install.sh | bash -s -- --force --menu
+wget -qO- https://raw.githubusercontent.com/sockc/xsb-onekey/main/install.sh | bash -s -- --force --menu
 ```
 安装完成后运行：
 ```bash
