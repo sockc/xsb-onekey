@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DEFAULT="vinchi008/xsb-onekey"
+REPO_DEFAULT="sockc/xsb-onekey"
 BRANCH="main"
 VERSION=""
 MIRROR="raw"          # raw | ghproxy
