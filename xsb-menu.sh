@@ -1864,12 +1864,15 @@ uninstall_all(){
 main_menu(){
   while true; do
     clear
-   
+    
     echo
-    echo -e "${BLU}==============================${RST}"
-    echo -e "${BLU}  XSB OneKey Manager Menu     ${RST}"
-    echo -e "${BLU}  VERSION: ${VERSION}          ${RST}"
-    echo -e "${BLU}==============================${RST}"
+    # --- 极光渐变猫咪 (Aurora Cat) By sockc ---
+    echo -e "\033[1;34m ============================================\033[0m"
+    echo -e "\033[1;36m      |\__/,|   (\`\ \033[0m    \033[1;37mXSB OneKey\033[0m"
+    echo -e "\033[1;36m    _.|\033[1;37mo o\033[1;36m  |_   ) ) \033[0m   \033[1;34m[ v${VERSION} ]\033[0m"
+    echo -e "\033[1;34m  -(((---(((-------- \033[0m   \033[1;37mBy: sockc\033[0m"
+    echo
+    
     echo "1) 安装/初始化（Xray + sing-box）"
     echo "2) 重置（清空入站，保留二进制）"
     echo "3) 模板部署（通用/UDP受限/纯IPv6）"
