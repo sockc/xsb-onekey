@@ -1863,6 +1863,8 @@ uninstall_all(){
 
 main_menu(){
   while true; do
+    clear
+   
     echo
     echo -e "${BLU}==============================${RST}"
     echo -e "${BLU}  XSB OneKey Manager Menu     ${RST}"
