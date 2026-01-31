@@ -1863,7 +1863,6 @@ uninstall_all(){
 
 main_menu(){
   while true; do
-    clear
     echo
     echo -e "\033[1;34m =======================================\033[0m"
     echo -e "\033[1;37m      |\__/,|   (\`\ \033[0m    \033[1;33mXSB OneKey\033[0m"
