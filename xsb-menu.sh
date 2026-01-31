@@ -447,6 +447,237 @@ fw_custom_close_menu(){
     esac
   fi
 }
+# =========================
+# Dokodemo-door Manager (Xray)
+# =========================
+doko_list(){
+  echo -e "${BLU}--- dokodemo-door 转发规则 ---${RST}"
+  jq -r '
+    .doko_rules[]? |
+    "\(.tag)\t\(.enabled)\t\(.listen):\(.listen_port)\t->\t\(.target_addr):\(.target_port)\t\(.network)\tout=\(.outbound)"
+  ' "$META_JSON" 2>/dev/null || true
+}
+
+doko_show_one(){
+  local tag="$1"
+  jq -r --arg t "$tag" '.doko_rules[]? | select(.tag==$t)' "$META_JSON" | jq . || true
+}
+
+doko_meta_set_enabled(){
+  local tag="$1" val="$2"
+  tmp="$(mktemp)"
+  jq --arg t "$tag" --argjson v "$val" '
+    .doko_rules |= map(if .tag==$t then .enabled=$v else . end)
+  ' "$META_JSON" >"$tmp" && mv "$tmp" "$META_JSON"
+}
+
+doko_meta_remove(){
+  local tag="$1"
+  tmp="$(mktemp)"
+  jq --arg t "$tag" '
+    .doko_rules |= map(select(.tag != $t))
+  ' "$META_JSON" >"$tmp" && mv "$tmp" "$META_JSON"
+}
+
+doko_add_wizard(){
+  ensure_xray_routing
+
+  local name listen lport addr dport net outbound shost sport tag
+  read -rp "规则备注（例如 doko-10065，可空自动生成）: " name
+  read -rp "监听地址（默认 0.0.0.0；强烈建议内网用 127.0.0.1）: " listen
+  listen="${listen:-0.0.0.0}"
+
+  read -rp "监听端口（例如 12345）: " lport
+  [[ -n "$lport" ]] || { warn "未输入监听端口"; return 1; }
+
+  read -rp "目标地址（例如 12.34.56.789）: " addr
+  [[ -n "$addr" ]] || { warn "未输入目标地址"; return 1; }
+
+  read -rp "目标端口（例如 12345）: " dport
+  [[ -n "$dport" ]] || { warn "未输入目标端口"; return 1; }
+
+  echo "网络："
+  echo "1) tcp"
+  echo "2) udp"
+  echo "3) tcp+udp"
+  read -rp "选择 [1-3]（默认3）: " c
+  case "${c:-3}" in
+    1) net="tcp" ;;
+    2) net="udp" ;;
+    *) net="tcp,udp" ;;
+  esac
+
+  echo "转发出站："
+  echo "1) direct（直连转发）"
+  echo "2) socks5（走本机 SOCKS5 上游，比如 mihomo 127.0.0.1:7890）"
+  read -rp "选择 [1-2]（默认1）: " o
+  case "${o:-1}" in
+    2)
+      outbound="doko-socks"
+      read -rp "SOCKS5 地址（默认 127.0.0.1）: " shost
+      shost="${shost:-127.0.0.1}"
+      read -rp "SOCKS5 端口（默认 7890）: " sport
+      sport="${sport:-7890}"
+      ;;
+    *)
+      outbound="direct"
+      shost=""
+      sport=""
+      ;;
+  esac
+
+  # tag：固定用 dokodemo inbound tag
+  if [[ -n "$name" ]]; then
+    tag="$(echo "$name" | tr ' ' '_' | tr -cd 'A-Za-z0-9._-')"
+  fi
+  [[ -n "$tag" ]] || tag="doko-${lport}"
+
+  # meta 写入
+  tmp="$(mktemp)"
+  jq --arg tag "$tag" \
+     --arg listen "$listen" \
+     --argjson lp "$lport" \
+     --arg addr "$addr" \
+     --argjson dp "$dport" \
+     --arg net "$net" \
+     --arg out "$outbound" \
+     --arg sh "$shost" \
+     --argjson sp "${sport:-0}" \
+  '
+    .doko_rules += [{
+      "tag":$tag,
+      "enabled":true,
+      "listen":$listen,
+      "listen_port":$lp,
+      "target_addr":$addr,
+      "target_port":$dp,
+      "network":$net,
+      "outbound":$out,
+      "socks_host": (if $out=="doko-socks" then $sh else null end),
+      "socks_port": (if $out=="doko-socks" then (if ($sp|tostring)=="0" then 7890 else $sp end) else null end)
+    }]
+  ' "$META_JSON" >"$tmp" && mv "$tmp" "$META_JSON"
+
+  # 启用写入 xray cfg
+  doko_apply_enable "$tag" || {
+    warn "启用失败：已写入 meta，你可以在菜单里再启用一次"
+    doko_meta_set_enabled "$tag" false || true
+    return 1
+  }
+
+  # 防火墙放行（按 network）
+  read -rp "是否一键放行端口到防火墙？(y/N): " yn
+  if [[ "$yn" =~ ^[Yy]$ ]]; then
+    if [[ "$net" == "tcp" ]]; then open_port "$lport" "tcp"
+    elif [[ "$net" == "udp" ]]; then open_port "$lport" "udp"
+    else open_port "$lport" "tcp"; open_port "$lport" "udp"
+    fi
+    ok "已尝试放行端口（注意云安全组也要放行）"
+  fi
+
+  ok "新增完成：$tag"
+}
+
+doko_delete(){
+  doko_list
+  echo
+  read -rp "输入要删除的规则 tag： " tag
+  [[ -n "$tag" ]] || return 0
+
+  # 先从 xray cfg 移除
+  doko_apply_disable "$tag" || true
+
+  # 再从 meta 删除
+  doko_meta_remove "$tag"
+  ok "已删除规则：$tag"
+}
+
+doko_toggle(){
+  doko_list
+  echo
+  read -rp "输入要操作的规则 tag： " tag
+  [[ -n "$tag" ]] || return 0
+
+  local enabled
+  enabled="$(jq -r --arg t "$tag" '.doko_rules[]? | select(.tag==$t) | .enabled' "$META_JSON" 2>/dev/null || echo "")"
+  [[ -n "$enabled" && "$enabled" != "null" ]] || { warn "未找到规则：$tag"; return 1; }
+
+  if [[ "$enabled" == "true" ]]; then
+    doko_apply_disable "$tag" || return 1
+    doko_meta_set_enabled "$tag" false
+  else
+    doko_apply_enable "$tag" || return 1
+    doko_meta_set_enabled "$tag" true
+  fi
+}
+
+doko_firewall_allow(){
+  doko_list
+  echo
+  read -rp "输入规则 tag： " tag
+  [[ -n "$tag" ]] || return 0
+
+  local lp net
+  lp="$(jq -r --arg t "$tag" '.doko_rules[]? | select(.tag==$t) | .listen_port' "$META_JSON")"
+  net="$(jq -r --arg t "$tag" '.doko_rules[]? | select(.tag==$t) | .network' "$META_JSON")"
+  [[ -n "$lp" && "$lp" != "null" ]] || { warn "未找到规则：$tag"; return 1; }
+
+  if [[ "$net" == "tcp" ]]; then open_port "$lp" "tcp"
+  elif [[ "$net" == "udp" ]]; then open_port "$lp" "udp"
+  else open_port "$lp" "tcp"; open_port "$lp" "udp"
+  fi
+  ok "已尝试放行：$lp ($net)（云安全组别忘了）"
+}
+
+doko_test_local(){
+  doko_list
+  echo
+  read -rp "输入规则 tag： " tag
+  [[ -n "$tag" ]] || return 0
+
+  local addr dport
+  addr="$(jq -r --arg t "$tag" '.doko_rules[]? | select(.tag==$t) | .target_addr' "$META_JSON")"
+  dport="$(jq -r --arg t "$tag" '.doko_rules[]? | select(.tag==$t) | .target_port' "$META_JSON")"
+  [[ -n "$addr" && "$addr" != "null" ]] || { warn "未找到规则：$tag"; return 1; }
+
+  if have nc; then
+    echo "TCP 测试：nc -vz $addr $dport"
+    nc -vz "$addr" "$dport" || true
+  else
+    warn "未安装 nc（netcat），建议安装：apt-get install -y netcat-openbsd"
+  fi
+}
+
+dokodemo_menu(){
+  while true; do
+    echo
+    echo -e "${BLU}==============================${RST}"
+    echo -e "${BLU}  端口转发（dokodemo-door）   ${RST}"
+    echo -e "${BLU}==============================${RST}"
+    echo "1) 新增转发规则（向导）"
+    echo "2) 查看转发规则列表"
+    echo "3) 查看规则详情（JSON）"
+    echo "4) 删除规则"
+    echo "5) 启用/禁用规则（toggle）"
+    echo "6) 一键放行端口（防火墙）"
+    echo "7) 测试连通性（本机->目标）"
+    echo "0) 返回"
+    echo
+    read -rp "选择: " c
+    case "$c" in
+      1) doko_add_wizard ;;
+      2) doko_list ;;
+      3) read -rp "输入规则 tag： " t; [[ -n "$t" ]] && doko_show_one "$t" ;;
+      4) doko_delete ;;
+      5) doko_toggle ;;
+      6) doko_firewall_allow ;;
+      7) doko_test_local ;;
+      0) return 0 ;;
+      *) warn "无效选项" ;;
+    esac
+  done
+}
+
 
 firewall_menu(){
   while true; do
@@ -494,18 +725,18 @@ init_meta(){
 {
   "bind_mode": "dual",
   "xray_inbounds": [],
-  "singbox_inbounds": []
+  "singbox_inbounds": [],
+  "doko_rules": []
 }
 JSON
+    return 0
   fi
-}
 
-meta_get_bind_mode(){ jq -r '.bind_mode' "$META_JSON"; }
-meta_set_bind_mode(){
-  local mode="$1"
-  tmp="$(mktemp)"
-  jq --arg m "$mode" '.bind_mode=$m' "$META_JSON" >"$tmp"
-  mv "$tmp" "$META_JSON"
+  # 迁移旧 meta：补齐 doko_rules
+  if ! jq -e '.doko_rules' "$META_JSON" >/dev/null 2>&1; then
+    tmp="$(mktemp)"
+    jq '. + {"doko_rules":[]}' "$META_JSON" >"$tmp" && mv "$tmp" "$META_JSON"
+  fi
 }
 
 # --------- Default configs ----------
@@ -573,6 +804,160 @@ json_del_inbound_sb_by_tag(){
   tmp="$(mktemp)"
   jq --arg t "$tag" '.inbounds |= map(select(.tag != $t))' "$SB_CFG" >"$tmp"
   mv "$tmp" "$SB_CFG"
+}
+
+# =========================
+# Xray: ensure routing/outbound tags (for dokodemo-door)
+# =========================
+ensure_xray_routing(){
+  init_xray_cfg
+  tmp="$(mktemp)"
+
+  # 1) 确保 outbounds[direct] 有 tag=direct
+  # 2) 确保存在 routing.rules 数组
+  jq '
+    .outbounds |= (map(
+      if (.protocol=="freedom" and (.tag|not)) then . + {"tag":"direct"} else . end
+    )) |
+    (if (.routing|type)!="object" then . + {"routing":{"domainStrategy":"AsIs","rules":[]}}
+     else
+       .routing |= (if (.rules|type)!="array" then . + {"rules":[]} else . end)
+     end)
+  ' "$XRAY_CFG" >"$tmp" && mv "$tmp" "$XRAY_CFG"
+}
+
+# add socks outbound if needed (for "转发走代理")
+ensure_xray_socks_outbound(){
+  local host="${1:-127.0.0.1}"
+  local port="${2:-7890}"
+  ensure_xray_routing
+
+  if jq -e '.outbounds[]? | select(.tag=="doko-socks")' "$XRAY_CFG" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  tmp="$(mktemp)"
+  jq --arg host "$host" --argjson port "$port" '
+    .outbounds += [{
+      "tag":"doko-socks",
+      "protocol":"socks",
+      "settings":{"servers":[{"address":$host,"port":$port}]}
+    }]
+  ' "$XRAY_CFG" >"$tmp" && mv "$tmp" "$XRAY_CFG"
+}
+
+# Remove routing rules by inboundTag
+xray_del_rules_by_inboundTag(){
+  local itag="$1"
+  ensure_xray_routing
+  tmp="$(mktemp)"
+  jq --arg t "$itag" '
+    .routing.rules |= map(select((.inboundTag|type)!="array" or (.inboundTag|index($t)|not)))
+  ' "$XRAY_CFG" >"$tmp" && mv "$tmp" "$XRAY_CFG"
+}
+
+# Add routing rule for inboundTag -> outboundTag
+xray_add_rule_inbound_to_outbound(){
+  local itag="$1"
+  local otag="$2"
+  ensure_xray_routing
+
+  tmp="$(mktemp)"
+  jq --arg it "$itag" --arg ot "$otag" '
+    .routing.rules += [{
+      "type":"field",
+      "inboundTag":[ $it ],
+      "outboundTag": $ot
+    }]
+  ' "$XRAY_CFG" >"$tmp" && mv "$tmp" "$XRAY_CFG"
+}
+
+# Build dokodemo inbound JSON
+xray_build_dokodemo_inbound(){
+  local tag="$1" listen="$2" listen_port="$3" target_addr="$4" target_port="$5" net="$6"
+  jq -nc \
+    --arg tag "$tag" \
+    --arg listen "$listen" \
+    --argjson lport "$listen_port" \
+    --arg addr "$target_addr" \
+    --argjson dport "$target_port" \
+    --arg net "$net" \
+'{
+  "tag": $tag,
+  "listen": $listen,
+  "port": $lport,
+  "protocol": "dokodemo-door",
+  "settings": {
+    "address": $addr,
+    "port": $dport,
+    "network": $net
+  },
+  "sniffing": {"enabled": false}
+}'
+}
+
+# Apply: enable a dokodemo rule (from meta -> xray cfg)
+doko_apply_enable(){
+  local tag="$1"
+  ensure_xray_routing
+
+  # 从 meta 取
+  local listen lport addr dport net outbound
+  listen="$(jq -r --arg t "$tag" '.doko_rules[] | select(.tag==$t) | .listen' "$META_JSON")"
+  lport="$(jq -r --arg t "$tag" '.doko_rules[] | select(.tag==$t) | .listen_port' "$META_JSON")"
+  addr="$(jq -r --arg t "$tag" '.doko_rules[] | select(.tag==$t) | .target_addr' "$META_JSON")"
+  dport="$(jq -r --arg t "$tag" '.doko_rules[] | select(.tag==$t) | .target_port' "$META_JSON")"
+  net="$(jq -r --arg t "$tag" '.doko_rules[] | select(.tag==$t) | .network' "$META_JSON")"
+  outbound="$(jq -r --arg t "$tag" '.doko_rules[] | select(.tag==$t) | .outbound' "$META_JSON")"
+
+  [[ -n "$listen" && -n "$lport" && -n "$addr" && -n "$dport" && -n "$net" ]] || {
+    err "meta 信息不完整，无法启用：$tag"
+    return 1
+  }
+
+  # outbound: direct | doko-socks
+  if [[ "$outbound" == "doko-socks" ]]; then
+    local shost sport
+    shost="$(jq -r --arg t "$tag" '.doko_rules[] | select(.tag==$t) | .socks_host' "$META_JSON")"
+    sport="$(jq -r --arg t "$tag" '.doko_rules[] | select(.tag==$t) | .socks_port' "$META_JSON")"
+    [[ -n "$shost" && "$shost" != "null" ]] || shost="127.0.0.1"
+    [[ -n "$sport" && "$sport" != "null" ]] || sport="7890"
+    ensure_xray_socks_outbound "$shost" "$sport"
+  else
+    outbound="direct"
+  fi
+
+  # 清掉旧的同 tag inbound/rule，避免重复
+  json_del_inbound_xray_by_tag "$tag" || true
+  xray_del_rules_by_inboundTag "$tag" || true
+
+  local inbound
+  inbound="$(xray_build_dokodemo_inbound "$tag" "$listen" "$lport" "$addr" "$dport" "$net")"
+  json_append_inbound_xray "$inbound"
+  xray_add_rule_inbound_to_outbound "$tag" "$outbound"
+
+  # 配置测试 + 重启
+  $XRAY_BIN run -test -config "$XRAY_CFG" >/dev/null 2>&1 || {
+    err "Xray 配置测试失败，已阻止启用：$tag"
+    return 1
+  }
+  svc_restart xray
+
+  ok "已启用转发规则：$tag  (${listen}:${lport} -> ${addr}:${dport} / ${net} / outbound=${outbound})"
+}
+
+# Apply: disable a dokodemo rule (remove from xray cfg but keep meta)
+doko_apply_disable(){
+  local tag="$1"
+  json_del_inbound_xray_by_tag "$tag" || true
+  xray_del_rules_by_inboundTag "$tag" || true
+
+  $XRAY_BIN run -test -config "$XRAY_CFG" >/dev/null 2>&1 || {
+    warn "禁用后配置测试失败？我建议你把 /etc/xray/config.json 发我看看"
+    return 1
+  }
+  svc_restart xray
+  ok "已禁用转发规则：$tag（meta 保留）"
 }
 
 # --------- Public IP ----------
@@ -1491,14 +1876,14 @@ main_menu(){
     echo "6) 删除入站"
     echo "7) 导出链接/配置/二维码"
     echo "8) 节点体检（监听/防火墙/服务）"
-    echo "9) 延迟检测（轻量本机测试）"
-    echo "10) 查看日志"
-    echo "11) 更新核心（Xray/sing-box）"
-    echo "12) 备份"
-    echo "13) 恢复"
-    echo "14) 防火墙(UFW) 管理"
-    echo "15) 查看UFW状态"
-    echo "16) Xray 出站接入 mihomo 分流"
+    echo "9) 端口转发（dokodemo-door）"
+    echo "10) Xray 出站接入 mihomo 分流"
+    echo "11) 查看日志"
+    echo "12) 更新核心（Xray/sing-box）"
+    echo "13) 备份"
+    echo "14) 恢复"
+    echo "15) 防火墙(UFW) 管理"
+    echo "16) 查看UFW状态"
     echo "0) 返回"
     echo "99) 卸载 XSB（删除脚本/服务/配置）"
     echo
@@ -1512,14 +1897,14 @@ main_menu(){
       6) delete_inbound ;;
       7) export_all ;;
       8) health_check ;;
-      9) latency_test ;;
-      10) view_logs ;;
-      11) update_core ;;
-      12) backup_all ;;
-      13) restore_all ;;
-      14) firewall_menu ;;
-      15) fw_status ;;
-      16) mihomo_menu ;;
+      9) dokodemo_menu ;;
+      10) mihomo_menu ;;
+      11) view_logs ;;
+      12) update_core ;;
+      13) backup_all ;;
+      14) restore_all ;;
+      15) firewall_menu ;;
+      16) fw_status ;;
       0) return 0 ;;          # 或 exit 0，看你主菜单是函数还是主入口
       99) uninstall_xsb ;;
       *) warn "无效选项" ;;
