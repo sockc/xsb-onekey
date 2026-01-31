@@ -1884,12 +1884,12 @@ main_menu(){
     echo "8) 节点体检（监听/防火墙/服务）"
     echo "9) 端口转发（dokodemo-door）"
     echo "10) Xray 出站接入 mihomo 分流"
-    echo "11) 查看日志"
-    echo "12) 更新核心（Xray/sing-box）"
-    echo "13) 备份"
-    echo "14) 恢复"
-    echo "15) 防火墙(UFW) 管理"
-    echo "16) 查看UFW状态"
+    echo "11) 更新核心（Xray/sing-box）"
+    echo "12) 防火墙(UFW) 管理"
+    echo "13) 查看UFW状态"
+    echo "14) 查看日志"
+    echo "15) 备份"
+    echo "16) 恢复"
     echo "0) 返回"
     echo "99) 卸载 XSB（删除脚本/服务/配置）"
     echo
@@ -1905,12 +1905,12 @@ main_menu(){
       8) health_check ;;
       9) dokodemo_menu ;;
       10) mihomo_menu ;;
-      11) view_logs ;;
-      12) update_core ;;
-      13) backup_all ;;
-      14) restore_all ;;
-      15) firewall_menu ;;
-      16) fw_status ;;
+      11) update_core ;;
+      12) firewall_menu ;;
+      13) fw_status ;;
+      14) view_logs ;;
+      15) backup_all ;;
+      16) restore_all ;;
       0) return 0 ;;          
       99) uninstall_xsb ;;
       *) warn "无效选项" ;;
