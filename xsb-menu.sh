@@ -1871,12 +1871,13 @@ main_menu(){
     echo -e "\033[1;37m      |\__/,|   (\`\ \033[0m    \033[1;33mXSB OneKey\033[0m"
     echo -e "\033[1;37m    _.|\033[1;31mo o\033[1;37m  |_   ) ) \033[0m   \033[1;32m[ Ready... ]\033[0m"
     echo -e "\033[1;32m  -(((---(((-------- \033[0m   \033[1;33mBy: sockc\033[0m"
+    echo -e "\033[1;34m ============================================\033[0m"
     echo
     
-    echo "1) 安装/初始化（Xray + sing-box）"
-    echo "2) 重置（清空入站，保留二进制）"
-    echo "3) 模板部署（通用/UDP受限/纯IPv6）"
-    echo "4) 添加入站（自由选择协议）"
+    echo "1) 安装/初始化"
+    echo "2) 重置"
+    echo "3) 模板部署"
+    echo "4) 添加入站"
     echo "5) 列出入站"
     echo "6) 删除入站"
     echo "7) 导出链接/配置/二维码"
@@ -1910,7 +1911,7 @@ main_menu(){
       14) restore_all ;;
       15) firewall_menu ;;
       16) fw_status ;;
-      0) return 0 ;;          # 或 exit 0，看你主菜单是函数还是主入口
+      0) return 0 ;;          
       99) uninstall_xsb ;;
       *) warn "无效选项" ;;
     esac
