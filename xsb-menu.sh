@@ -1640,9 +1640,6 @@ health_check(){
   echo
 
   warn "如果本机监听正常但外网不通：优先检查云安全组/ACL（入站 TCP/UDP 端口）"
-  echo -e "${CYA}体检日志：请按 q 键退出${RST}"
-  ss -lntp 2>/dev/null | less || true
-  ss -lnup 2>/dev/null | less || true
 }
 
 # --------- Local latency check ----------
@@ -1865,8 +1862,7 @@ uninstall_all(){
 }
 
 main_menu(){
-  while true; do
-    clear 
+  while true; do 
     echo
     echo -e "\033[1;34m =======================================\033[0m"
     echo -e "\033[1;37m      |\__/,|   (\`\ \033[0m    \033[1;33mXSB OneKey\033[0m"
