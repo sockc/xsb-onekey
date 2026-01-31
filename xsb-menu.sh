@@ -1888,8 +1888,8 @@ main_menu(){
     echo "14) 查看日志"
     echo "15) 备份"
     echo "16) 恢复"
-    echo "0) 返回"
-    echo "99) 卸载 XSB（删除脚本/服务/配置）"
+    echo "0)  退出"
+    echo "99) 卸载"
     echo
     read -rp "请选择: " c
     case "$c" in
