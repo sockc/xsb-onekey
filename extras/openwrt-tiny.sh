@@ -283,6 +283,7 @@ main(){
   [ -x /usr/bin/xsb ] || { echo '#!/bin/sh\nsh /etc/xsb/openwrt-tiny.sh' > /usr/bin/xsb && chmod +x /usr/bin/xsb; }
 
   while true; do
+    clear
     echo "\n=============================="
     echo " XSB OpenWrt Tiny Menu (Simplified)"
     echo "=============================="
