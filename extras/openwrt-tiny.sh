@@ -1101,8 +1101,6 @@ main(){
     echo "=============================="
     echo " XSB OpenWrt Tiny Menu"
     echo "=============================="
-    echo " XSB OpenWrt Tiny Menu"
-    echo "=============================="
     echo "1) 安装 sing-box / xray"
     echo "2) 添加入站（Xray/sing-box）"
     echo "3) 查看分享链接"
