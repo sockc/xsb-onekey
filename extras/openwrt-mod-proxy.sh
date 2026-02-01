@@ -9,24 +9,25 @@ msg(){ echo "[xsb-openwrt] $*" >&2; }
 GW_DIR="/etc/xsb/gateway"
 GW_MODE_FILE="$GW_DIR/route_mode"           # 存储模式: A, B, C
 GW_SUB_URL_FILE="$GW_DIR/sub_url.conf"      # 存储订阅链接
+SB_NODES_FILE="$GW_DIR/sb_nodes.json"       # 存储转换后的节点数据
 SB_CFG="/etc/sing-box/config.json"
-MIHOMO_CFG="/etc/mihomo/config.yaml"
+CONV_API="https://api.v1.mk/sub?target=singbox&url=" # 使用肥羊/通用转换API
 
-# 确保目录存在
 ensure_dirs(){
   mkdir -p "$GW_DIR" /etc/sing-box /etc/mihomo >/dev/null 2>&1 || true
   [ -f "$GW_MODE_FILE" ] || echo "A" > "$GW_MODE_FILE"
   [ -f "$GW_SUB_URL_FILE" ] || touch "$GW_SUB_URL_FILE"
 }
 
-# ==============================
-# 依赖检查
-# ==============================
 check_dependencies(){
-  # 检查 python3 (用于生成 Sing-box 配置)
   if ! command -v python3 >/dev/null 2>&1; then
-    msg "❌ 缺少 python3，无法生成 Sing-box 规则。"
+    msg "❌ 缺少 python3，无法处理节点数据。"
     msg "请运行: opkg update && opkg install python3-light python3-json"
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    msg "❌ 缺少 curl，无法下载订阅。"
+    msg "请运行: opkg update && opkg install curl"
     return 1
   fi
   return 0
@@ -38,8 +39,7 @@ check_dependencies(){
 set_subscription(){
   echo
   echo ">>> 设置订阅链接 <<<"
-  echo "注意：由于使用 Sing-box，建议使用【Sing-box 格式】的订阅链接。"
-  echo "如果不确定，请使用转换工具将机场订阅转换为 Sing-box 格式。"
+  echo "脚本已内置转换功能，支持 Clash / V2ray / SSR 等各种链接。"
   echo
   curr="$(cat "$GW_SUB_URL_FILE" 2>/dev/null || echo "")"
   [ -n "$curr" ] && echo "当前链接: ${curr:0:30}..."
@@ -49,25 +49,70 @@ set_subscription(){
   if [ -n "$url" ]; then
     echo "$url" > "$GW_SUB_URL_FILE"
     msg "✅ 链接已保存"
+    # 立即尝试下载转换
+    download_and_convert "$url"
+  fi
+}
+
+# 下载并转换订阅为 Sing-box 格式
+download_and_convert(){
+  url="$1"
+  msg "🔄 正在下载并转换节点 (需联网)..."
+  
+  # 对 URL 进行简单的 URL Encode (防止 & 符号截断)
+  safe_url="$(echo "$url" | sed 's/:/%3A/g; s/\//%2F/g; s/?/%3F/g; s/&/%26/g; s/=/%3D/g')"
+  
+  # 调用 API 转换
+  full_api="${CONV_API}${safe_url}"
+  
+  if curl -k -sL "$full_api" -o "$SB_NODES_FILE"; then
+    # 简单校验是否为 JSON
+    if grep -q "outbounds" "$SB_NODES_FILE"; then
+      msg "✅ 节点获取成功！"
+    else
+      msg "❌ 转换失败：返回内容不是有效的 Sing-box 配置。"
+      cat "$SB_NODES_FILE" | head -n 5
+    fi
+  else
+    msg "❌ 下载失败，请检查网络。"
   fi
 }
 
 # ==============================
-# 2. 核心：Python 配置生成器
+# 2. Python 配置生成器 (集成节点注入)
 # ==============================
-# 这个函数会临时创建一个 Python 脚本来生成复杂的 config.json
 generate_sb_config(){
   mode="$1"
-  sub_url="$2"
   
   cat <<EOF > /tmp/gen_sb.py
 import json
 import sys
+import os
 
 mode = "$mode"
-sub_url = "$sub_url"
+nodes_file = "$SB_NODES_FILE"
 
-# --- 基础结构 ---
+# --- 1. 读取下载好的节点文件 ---
+node_outbounds = []
+node_tags = []
+
+if os.path.exists(nodes_file):
+    try:
+        with open(nodes_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            # 提取里面的 outbounds，排除 direct/block 等内置类型
+            for out in data.get('outbounds', []):
+                if out.get('type') not in ['selector', 'urltest', 'direct', 'block', 'dns']:
+                    node_outbounds.append(out)
+                    node_tags.append(out['tag'])
+    except Exception as e:
+        sys.stderr.write(f"Error loading nodes: {e}\n")
+
+# 如果没有节点，加一个假的防止报错
+if not node_tags:
+    node_tags = ["DIRECT"]
+
+# --- 2. 基础结构 ---
 config = {
     "log": {"level": "info"},
     "dns": {
@@ -85,80 +130,89 @@ config = {
         {"type": "tproxy", "tag": "tproxy-in", "listen": "::", "listen_port": 7893},
         {"type": "mixed", "tag": "mixed-in", "listen": "::", "listen_port": 7890}
     ],
+    # 开启 Clash API 以便使用 Web 面板选节点
+    "experimental": {
+        "clash_api": {
+            "external_controller": "0.0.0.0:9090",
+            "external_ui": "ui",
+            "secret": "123456"  # 面板密码
+        }
+    },
     "outbounds": [],
     "route": {"rules": []}
 }
 
-# --- 出站策略 (Outbounds) ---
-# 1. 核心选择器
-outbounds = [
-    {"type": "selector", "tag": "🚀 节点选择", "outbounds": ["⚡ 自动优选", "DIRECT"], "interrupt_exist_connections": True},
-    {"type": "urltest", "tag": "⚡ 自动优选", "outbounds": [], "url": "http://www.gstatic.com/generate_204", "interval": "10m"},
+# --- 3. 组装出站 (Outbounds) ---
+
+# [自动优选]
+auto_group = {
+    "type": "urltest", 
+    "tag": "⚡ 自动优选", 
+    "outbounds": node_tags, 
+    "url": "http://www.gstatic.com/generate_204", 
+    "interval": "10m"
+}
+
+# [节点选择] - 这里是关键，把所有下载的节点加进去
+proxy_select_group = {
+    "type": "selector", 
+    "tag": "🚀 节点选择", 
+    "outbounds": ["⚡ 自动优选"] + node_tags + ["DIRECT"], 
+    "interrupt_exist_connections": True
+}
+
+# 基础 Outbounds
+final_outbounds = [
+    proxy_select_group,
+    auto_group,
     {"type": "direct", "tag": "DIRECT"},
     {"type": "block", "tag": "BLOCK"},
     {"type": "dns", "tag": "dns-out"}
-]
+] + node_outbounds  # 把下载的实际节点追加到最后
 
-# 2. 模式 B 的额外策略组 (对应你刚才的规则)
+# Mode B 的策略组
 if mode == "B":
     groups = ["📹 YouTube", "🎵 Spotify", "💳 PayPal", "🤖 AI & Copilot", "📺 其他流媒体", "💰 虚拟货币", "📲 电报消息", "🐟 漏网之鱼"]
     for g in groups:
-        outbounds.append({"type": "selector", "tag": g, "outbounds": ["🚀 节点选择", "⚡ 自动优选", "DIRECT"]})
+        # 每个策略组都可以选：手动选好的节点、自动优选、或直连
+        final_outbounds.insert(2, {
+            "type": "selector", 
+            "tag": g, 
+            "outbounds": ["🚀 节点选择", "⚡ 自动优选", "DIRECT"]
+        })
 
-config["outbounds"] = outbounds
+config["outbounds"] = final_outbounds
 
-# --- 分流规则 (Route) ---
+# --- 4. 分流规则 (Route) ---
 rules = [
     {"protocol": "dns", "outbound": "dns-out"},
-    {"port": [22, 53, 9090, 7890, 7893], "outbound": "DIRECT"}
+    {"port": [22, 53, 9090, 7890, 7893], "outbound": "DIRECT"},
+    {"clash_mode": "Direct", "outbound": "DIRECT"},
+    {"clash_mode": "Global", "outbound": "🚀 节点选择"}
 ]
 
 if mode == "A":
-    # === A线: 基础分流 ===
     rules.append({"geosite": ["cn"], "geoip": ["cn", "private"], "outbound": "DIRECT"})
-    rules.append({"outbound": "🚀 节点选择"}) # 兜底
+    rules.append({"outbound": "🚀 节点选择"})
 
 elif mode == "B":
-    # === B线: 你的定制规则 ===
-    # 独立应用
     rules.append({"geosite": ["youtube"], "outbound": "📹 YouTube"})
     rules.append({"geosite": ["spotify"], "outbound": "🎵 Spotify"})
     rules.append({"geosite": ["paypal"], "outbound": "💳 PayPal"})
-    # AI
     rules.append({"geosite": ["openai", "anthropic", "google-gemini", "github"], "outbound": "🤖 AI & Copilot"})
-    # 流媒体
     rules.append({"geosite": ["netflix", "disney", "category-porn"], "outbound": "📺 其他流媒体"})
-    # 货币
     rules.append({"geosite": ["category-cryptocurrency", "binance", "okx"], "outbound": "💰 虚拟货币"})
-    # 社媒
     rules.append({"geosite": ["telegram"], "outbound": "📲 电报消息"})
     rules.append({"geoip": ["telegram"], "outbound": "📲 电报消息"})
-    # 常规
     rules.append({"geosite": ["google", "microsoft"], "outbound": "🚀 节点选择"})
-    # 直连
     rules.append({"geosite": ["cn"], "geoip": ["cn", "private"], "outbound": "DIRECT"})
-    # 兜底
     rules.append({"outbound": "🐟 漏网之鱼"})
 
 config["route"]["rules"] = rules
 
-# --- 特殊处理: 订阅节点 ---
-# Sing-box 不像 Clash 那样原生支持 url 订阅。
-# 为了脚本简单，我们在生成的 JSON 里加一个 "experimental" 字段提示。
-# 实际节点需要通过 'sing-box-subscribe' 或类似工具注入，或者这里假设 sub_url 也是一个 Remote set.
-# 这里我们用最简单的 Remote 方案 (Sing-box 1.8+):
-if sub_url:
-    # 定义一个 Remote Tag
-    remote_tag = "remote-nodes"
-    # 添加 Remote Outbound
-    # 注意: 如果你的订阅不是 Sing-box 格式，这里会报错。
-    # 暂时作为提示，或者需要配合外部转换器。
-    pass 
-
 print(json.dumps(config, indent=2, ensure_ascii=False))
 EOF
 
-  # 执行生成
   python3 /tmp/gen_sb.py > "$SB_CFG"
   rm -f /tmp/gen_sb.py
 }
@@ -176,35 +230,39 @@ gw_rebuild_all(){
   echo
   msg "🔄 正在应用模式: $mode"
   
-  # --- 停止所有服务 ---
   [ -x /etc/init.d/sing-box ] && /etc/init.d/sing-box stop >/dev/null 2>&1
   [ -x /etc/init.d/mihomo ] && /etc/init.d/mihomo stop >/dev/null 2>&1
   
   case "$mode" in
     A|B)
-      # === SING-BOX 模式 ===
       msg "   - 内核: Sing-box"
       if [ -z "$sub_url" ]; then
         msg "⚠️ 警告：未设置订阅链接！"
+      elif [ ! -f "$SB_NODES_FILE" ]; then
+        msg "⚠️ 节点文件不存在，尝试下载..."
+        download_and_convert "$sub_url"
       fi
       
       msg "   - 生成配置文件..."
-      generate_sb_config "$mode" "$sub_url"
+      generate_sb_config "$mode"
       
       msg "   - 启动 Sing-box..."
       if [ -x /etc/init.d/sing-box ]; then
         /etc/init.d/sing-box start
-        msg "✅ Sing-box 已启动 (Mode $mode)"
+        msg "✅ Sing-box 已启动"
+        echo
+        echo "========================================"
+        echo "🎉 节点选择请访问 Web 面板："
+        echo "   http://<路由器IP>:9090/ui"
+        echo "   密码: 123456"
+        echo "========================================"
       else
         msg "❌ 未安装 sing-box 服务！"
       fi
       ;;
       
     C)
-      # === MIHOMO 模式 (闲置) ===
-      msg "   - 内核: Mihomo (Clash)"
-      msg "   - 状态: 维护中 / 闲置"
-      msg "ℹ️ C线目前仅作为占位符，未生成实际配置。"
+      msg "   - C线闲置中..."
       ;;
   esac
 }
@@ -217,25 +275,19 @@ set_route_mode(){
   echo "当前模式: $(cat "$GW_MODE_FILE" 2>/dev/null || echo "Unknown")"
   echo "------------------------------"
   echo "A) 基础分流 (Sing-box)"
-  echo "   [逻辑] 国内直连，其他全代理。简单稳定。"
-  echo
+  echo "   [逻辑] 国内直连，其他走代理。"
   echo "B) 进阶分流 (Sing-box)"
-  echo "   [逻辑] YouTube/Spotify/AI/PayPal 独立分流。"
-  echo "   (即你刚才提供的 Clash 规则复刻版)"
-  echo
-  echo "C) 维护模式 (Mihomo/Clash)"
-  echo "   [状态] 暂时闲置，等待后续维护。"
+  echo "   [逻辑] YouTube/AI/PayPal 等独立分流。"
+  echo "C) 维护模式 (Mihomo)"
   echo "------------------------------"
   printf "请选择 [A/B/C]: "
   read m
   m="$(echo "$m" | tr '[:lower:]' '[:upper:]')"
-  
   case "$m" in
     A|B|C)
       echo "$m" > "$GW_MODE_FILE"
       msg "✅ 模式已切换为 $m"
-      # 询问是否应用
-      printf "是否立即重建配置并重启服务? (y/N): "
+      printf "是否立即应用? (y/N): "
       read yn
       case "$yn" in y|Y) gw_rebuild_all ;; esac
       ;;
@@ -243,7 +295,6 @@ set_route_mode(){
   esac
 }
 
-# 导出函数名，适配主脚本
 proxy_gateway_menu(){
   ensure_dirs
   while true; do
@@ -252,16 +303,16 @@ proxy_gateway_menu(){
     echo "=============================="
     echo " 网关管理中心 (当前: $curr线)"
     echo "=============================="
-    echo "1) 切换模式 (A:基础 / B:进阶 / C:闲置)"
-    echo "2) 设置订阅链接"
-    echo "3) 一键应用配置 (重启服务)"
+    echo "1) 切换模式 (A/B/C)"
+    echo "2) 设置订阅链接 (自动转换)"
+    echo "3) 更新节点/应用配置"
     echo "0) 返回"
     printf "选择: "
     read c
     case "$c" in
       1) set_route_mode ;;
       2) set_subscription ;;
-      3) gw_rebuild_all ;;
+      3) download_and_convert "$(cat "$GW_SUB_URL_FILE" 2>/dev/null)" && gw_rebuild_all ;;
       0) return 0 ;;
       *) echo "无效选项" ;;
     esac
