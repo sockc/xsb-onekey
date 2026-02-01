@@ -1865,25 +1865,25 @@ main_menu(){
     echo -e "\033[1;32m  -(((---(((-------- \033[0m   \033[1;33mBy: sockc\033[0m"
     echo -e "\033[1;34m =======================================\033[0m"
     echo
-    
-    echo "1)  安装/初始化"
-    echo "2)  重置"
-    echo "3)  模板部署"
-    echo "4)  添加入站"
-    echo "5)  列出入站"
-    echo "6)  删除入站"
-    echo "7)  导出链接/配置/二维码"
-    echo "8)  节点体检（监听/防火墙/服务）"
-    echo "9)  端口转发（dokodemo-door）"
-    echo "10) Xray 出站接入 mihomo 分流"
-    echo "11) 更新核心（Xray/sing-box）"
-    echo "12) 防火墙(UFW) 管理"
-    echo "13) 查看UFW状态"
-    echo "14) 查看日志"
-    echo "15) 备份"
-    echo "16) 恢复"
-    echo "0)  退出"
-    echo "99) 卸载"
+
+    echo -e "       ${GREEN}[ 核心 ]${PLAIN}"
+    echo "1   安装/初始化       2  重置"
+    echo "3   模板部署          4  添加入站"
+    echo "5   列出入站          6  删除入站"
+    echo "6   删除入站          7  导出链接/配置/二维码"
+    echo "8   节点体检"
+
+    echo -e "\n     ${GREEN}[ 工具 ]${PLAIN}"
+    echo " 9   端口转发（dokodemo-door）" 
+    echo "10   Xray 出站接入 mihomo 分流"
+
+    echo -e "\n     ${GREEN}[ 维护 ]${PLAIN}"
+    echo "11  更新核心（Xray/sing-box）"
+    echo "12  防火墙(UFW) 管理"
+    echo "13  查看UFW状态       14  查看日志"
+    echo "15  备份              16  恢复"
+
+    echo "0   退出              99  卸载"
     echo
     read -rp "请选择: " c
     case "$c" in
