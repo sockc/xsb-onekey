@@ -286,7 +286,10 @@ main(){
     echo "\n=============================="
     echo " XSB OpenWrt Tiny Menu (Simplified)"
     echo "=============================="
-    echo "1) 安装服务\n2) 添加入站\n3) 查看链接\n4) 重启服务\n5) 查看状态\n6) 卸载\n0) 退出"
+    echo "1) 安装服务      2) 添加入站"
+    echo "3) 查看链接      4) 重启服务"
+    echo "5) 查看状态      6) 卸载"
+    echo "0) 退出"
     printf "选择: "
     read c
     case "$c" in
