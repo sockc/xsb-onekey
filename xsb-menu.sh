@@ -1866,18 +1866,18 @@ main_menu(){
     echo -e "\033[1;34m =======================================\033[0m"
     echo
 
-    echo -e "${GREEN}[ 核心 ]${PLAIN}"
+    echo -e "[ 核心 ]"
     echo "1   安装/初始化       2  重置"
     echo "3   模板部署          4  添加入站"
     echo "5   列出入站          6  删除入站"
     echo "6   删除入站          7  导出链接/配置/二维码"
     echo "8   节点体检"
 
-    echo -e "\n${GREEN}[ 工具 ]${PLAIN}"
+    echo -e "[ 工具 ]"
     echo " 9   端口转发（dokodemo-door）" 
     echo "10   Xray 出站接入 mihomo 分流"
 
-    echo -e "\n${GREEN}[ 维护 ]${PLAIN}"
+    echo -e "[ 维护 ]"
     echo "11  更新核心（Xray/sing-box）"
     echo "12  防火墙(UFW) 管理"
     echo "13  查看UFW状态       14  查看日志"
