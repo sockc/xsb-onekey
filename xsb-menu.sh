@@ -1858,7 +1858,6 @@ uninstall_all(){
 
 main_menu(){
   while true; do 
-    clear
     echo
     echo -e "\033[1;34m =======================================\033[0m"
     echo -e "\033[1;37m      |\__/,|   (\`\ \033[0m    \033[1;33mXSB OneKey\033[0m"
@@ -1895,13 +1894,13 @@ main_menu(){
       5) list_inbounds ;;
       6) delete_inbound ;;
       7) export_all ;;
-      8) health_check; pause_return ;;
+      8) health_check ;;
       9) dokodemo_menu ;;
       10) mihomo_menu ;;
       11) update_core ;;
       12) firewall_menu ;;
-      13) fw_status; pause_return ;;
-      14) view_logs; pause_return ;;
+      13) fw_status ;;
+      14) view_logs ;;
       15) backup_all ;;
       16) restore_all ;;
       0) return 0 ;;          
