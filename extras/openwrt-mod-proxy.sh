@@ -3,17 +3,31 @@ set -eu
 
 msg(){ echo "[xsb-openwrt] $*" >&2; }
 
+# ==============================
+# Paths & Constants
+# ==============================
 GW_DIR="/etc/xsb/gateway"
 GW_NODES_DIR="$GW_DIR/nodes.d"
 GW_META_DIR="$GW_DIR/meta.d"
 GW_SLOTS_FILE="$GW_DIR/slots.conf"          # SLOT_HK=tag1,tag2
 GW_DEFAULT_SLOT_FILE="$GW_DIR/default_slot" # e.g. HK
 GW_IMPORTED_FILE="$GW_DIR/imported_links.txt"
+GW_MODE_FILE="$GW_DIR/route_mode"           # Stores: A, B, or C
+
+# Template Paths (Based on your request)
+# Assuming these are located inside /etc/xsb/ or a similar root. 
+# Adjust BASE_DIR if xsb-onekey is located elsewhere.
+BASE_DIR="/etc/xsb" 
+TPL_A_BASIC="$BASE_DIR/xsb-onekey/config/template_basic.yaml"
+TPL_B_LIGHT="$BASE_DIR/xsb-onekey/config/template_light.yaml"
+TPL_C_FULL="$BASE_DIR/xsb-onekey/config/template.yaml"
 
 ensure_gateway_dirs(){
   mkdir -p "$GW_DIR" "$GW_NODES_DIR" "$GW_META_DIR" >/dev/null 2>&1 || true
   [ -f "$GW_SLOTS_FILE" ] || : > "$GW_SLOTS_FILE"
   [ -f "$GW_IMPORTED_FILE" ] || : > "$GW_IMPORTED_FILE"
+  # Default to Mode B if not set
+  [ -f "$GW_MODE_FILE" ] || echo "B" > "$GW_MODE_FILE"
 }
 
 # ---------- deps ----------
@@ -433,12 +447,60 @@ choose_slot(){
   esac
 }
 
+# ==============================
+# Mode Management (A/B/C)
+# ==============================
+set_route_mode(){
+  echo
+  echo "当前分流模式: $(cat "$GW_MODE_FILE" 2>/dev/null || echo "Unknown")"
+  echo "------------------------------"
+  echo "A) 基础模式 (仅国内直连 + 国外代理)"
+  echo "B) 轻量分流 (精简规则集)"
+  echo "C) 完整分流 (Full Rules)"
+  echo "------------------------------"
+  printf "请选择模式 [A/B/C]: "
+  read m || m=""
+  
+  mode="$(echo "$m" | tr '[:lower:]' '[:upper:]')"
+  case "$mode" in
+    A) 
+      echo "A" > "$GW_MODE_FILE"
+      msg "✅ 已切换至 A线：基础模式"
+      ;;
+    B) 
+      echo "B" > "$GW_MODE_FILE"
+      msg "✅ 已切换至 B线：轻量分流"
+      ;;
+    C) 
+      echo "C" > "$GW_MODE_FILE"
+      msg "✅ 已切换至 C线：完整分流"
+      ;;
+    *) msg "❌ 无效输入，未变更" ;;
+  esac
+
+  # Attempt rebuild if command exists
+  if command -v gw_rebuild_all >/dev/null 2>&1; then
+    msg "正在应用新模式..."
+    gw_rebuild_all || true
+  fi
+}
+
+# Helper to get current template file path (Called by config generator)
+get_active_template(){
+  mode="$(cat "$GW_MODE_FILE" 2>/dev/null || echo "B")"
+  case "$mode" in
+    A) echo "$TPL_A_BASIC" ;;
+    C) echo "$TPL_C_FULL" ;;
+    *) echo "$TPL_B_LIGHT" ;; # Default to B
+  esac
+}
+
 # ---------- menus ----------
 exits_import_menu(){
   ensure_gateway_dirs
   echo
   echo "=============================="
-  echo " 路线B：导入节点（粘贴链接）"
+  echo " 导入节点（粘贴链接）"
   echo "=============================="
 
   link="$(read_link_paste)"
@@ -451,10 +513,10 @@ exits_import_menu(){
   slot_add_node "$slot" "$tag"
   msg "✅ 已绑定到槽位 $slot：$tag | $(node_name_get "$tag")"
 
-  if command -v gw_routeB_rebuild >/dev/null 2>&1; then
-    gw_routeB_rebuild || true
+  if command -v gw_rebuild_all >/dev/null 2>&1; then
+    gw_rebuild_all || true
   else
-    msg "ℹ️ 提示：稍后在网关里执行“一键开启/应用配置”使规则生效"
+    msg "ℹ️ 提示：稍后在网关里执行“应用配置”使规则生效"
   fi
 }
 
@@ -463,7 +525,7 @@ exits_slots_menu(){
   while true; do
     echo
     echo "=============================="
-    echo " 路线B：出口槽位管理"
+    echo " 出口槽位管理"
     echo "=============================="
     ds="$(default_slot_get)"; [ -n "$ds" ] || ds="<unset>"
     echo "当前默认槽位：$ds"
@@ -495,7 +557,7 @@ exits_slots_menu(){
       2)
         s="$(choose_slot)"; [ -n "$s" ] || continue
         default_slot_set "$s"
-        command -v gw_routeB_rebuild >/dev/null 2>&1 && gw_routeB_rebuild || true
+        command -v gw_rebuild_all >/dev/null 2>&1 && gw_rebuild_all || true
         ;;
       3)
         s="$(choose_slot)"; [ -n "$s" ] || continue
@@ -513,7 +575,7 @@ exits_slots_menu(){
         [ -n "$t" ] || continue
         slot_remove_node "$s" "$t"
         msg "✅ 已从 $s 移除：$t"
-        command -v gw_routeB_rebuild >/dev/null 2>&1 && gw_routeB_rebuild || true
+        command -v gw_rebuild_all >/dev/null 2>&1 && gw_rebuild_all || true
         ;;
       4)
         echo "当前节点："
@@ -522,7 +584,7 @@ exits_slots_menu(){
         IFS= read -r t || t=""
         [ -n "$t" ] || continue
         node_delete "$t"
-        command -v gw_routeB_rebuild >/dev/null 2>&1 && gw_routeB_rebuild || true
+        command -v gw_rebuild_all >/dev/null 2>&1 && gw_rebuild_all || true
         ;;
       5)
         echo "当前节点："
@@ -541,20 +603,23 @@ exits_slots_menu(){
 exits_menu(){
   ensure_gateway_dirs
   while true; do
+    curr_m="$(cat "$GW_MODE_FILE" 2>/dev/null || echo "B")"
     echo
     echo "=============================="
-    echo " 路线B：出口与节点"
+    echo " 网关路由管理 (当前模式: $curr_m)"
     echo "=============================="
-    echo "1) 导入节点（粘贴链接）"
-    echo "2) 出口槽位管理（绑定/默认/删除）"
-    echo "3) 查看已导入链接记录(末30条)"
+    echo "1) 切换分流模式 (A/B/C)"
+    echo "2) 导入节点（粘贴链接）"
+    echo "3) 出口槽位管理（绑定/默认/删除）"
+    echo "4) 查看已导入链接记录(末30条)"
     echo "0) 返回"
     printf "选择: "
     IFS= read -r c || c=""
     case "$c" in
-      1) exits_import_menu ;;
-      2) exits_slots_menu ;;
-      3) tail -n 30 "$GW_IMPORTED_FILE" 2>/dev/null || true ;;
+      1) set_route_mode ;;
+      2) exits_import_menu ;;
+      3) exits_slots_menu ;;
+      4) tail -n 30 "$GW_IMPORTED_FILE" 2>/dev/null || true ;;
       0) return 0 ;;
       *) echo "无效选项" ;;
     esac
