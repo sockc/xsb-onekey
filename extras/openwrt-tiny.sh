@@ -1238,7 +1238,7 @@ render_main_menu(){
   echo "3) 入站管理（删除/改名/查看端口/一键放行）"
   echo
   echo "[出站 · 透明网关]"
-  echo "6) 透明代理网关（路线A/B/C）"
+  echo "6) 透明代理网关（开发中）"
   echo
   echo "[系统]"
   echo "4) 安装/更新（sing-box / xray）"
