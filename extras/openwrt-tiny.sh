@@ -1107,6 +1107,54 @@ status_all(){
   fi
   echo
 }
+# ==============================
+# Uninstall logic
+# ==============================
+uninstall_service() {
+  echo
+  echo "--- 卸载中心 ---"
+  echo "1) 卸载 sing-box"
+  echo "2) 卸载 xray"
+  echo "3) 全部卸载 (SB + XR + 网关)"
+  echo "0) 取消"
+  printf "选择: "
+  read c || true
+
+  [ "${c:-0}" -eq 0 ] && return 0
+
+  printf "是否同时清理所有配置、证书和链接文件？(y/N): "
+  read clean || true
+  
+  case "$c" in
+    1)
+      svc_sb stop
+      opkg remove sing-box sing-box-tiny >/dev/null 2>&1 || true
+      rm -f /etc/init.d/sing-box 2>/dev/null || true
+      msg "✅ sing-box 程序已卸载"
+      ;;
+    2)
+      svc_xr stop
+      opkg remove xray-core xray >/dev/null 2>&1 || true
+      rm -f /etc/init.d/xray /etc/init.d/xray-core 2>/dev/null || true
+      msg "✅ xray 程序已卸载"
+      ;;
+    3)
+      svc_sb stop; svc_xr restart
+      [ -x /etc/init.d/xsb-gw ] && /etc/init.d/xsb-gw stop 2>/dev/null || true
+      opkg remove sing-box sing-box-tiny xray-core xray >/dev/null 2>&1 || true
+      rm -f /etc/init.d/sing-box /etc/init.d/xray /etc/init.d/xray-core /etc/init.d/xsb-gw 2>/dev/null || true
+      msg "✅ 所有程序已卸载"
+      ;;
+  esac
+
+  if [ "$clean" = "y" ] || [ "$clean" = "Y" ]; then
+    rm -rf "$XSB_DIR" "$SB_DIR" "$XR_DIR" "$MOD_CACHE_DIR" 2>/dev/null || true
+    rm -f /usr/bin/xsb 2>/dev/null || true
+    msg "🔥 所有配置文件及快捷命令已清理"
+  else
+    msg "ℹ️ 已保留配置目录，方便下次重装"
+  fi
+}
 
 # ==============================
 # Menus
@@ -1197,6 +1245,7 @@ render_main_menu(){
   echo "5) 重启服务"
   echo "7) 查看状态"
   echo "8) 查看防火墙放行规则"
+  echo "9) 卸载功能"
   echo "------------------------------"
   echo "0) 退出   r) 刷新   (回车=刷新)"
   printf "选择: "
@@ -1220,6 +1269,7 @@ main(){
       6) gateway_menu ;;
       7) status_all; pause ;;
       8) fw_show_rules; pause ;;
+      9) uninstall_service; pause ;;
       0) exit 0 ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
