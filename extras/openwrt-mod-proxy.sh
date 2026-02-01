@@ -1,5 +1,5 @@
 #!/bin/sh
-# V3.4 网络修复版：多API备选 + 手动导入模式
+# V3.2 启动修复版：基于 V3.2 逻辑，强制修复缺失的启动服务
 
 msg(){ echo "[xsb-openwrt] $*" >&2; }
 
@@ -26,13 +26,7 @@ GW_SUB_URL_FILE="$GW_DIR/sub_url.conf"
 SB_NODES_FILE="$GW_DIR/sb_nodes.json"       
 SB_CFG="/etc/sing-box/config.json"
 SB_UI_DIR="/etc/sing-box/ui"
-
-# --- 多重备选 API 列表 ---
-# 格式: 只写 API 的前半部分
-API_1="https://api.v1.mk/sub?target=singbox&url="      # 肥羊 (默认)
-API_2="https://sub.xeton.dev/sub?target=singbox&url="  # 备用1
-API_3="https://api.dler.io/sub?target=singbox&url="    # 备用2
-
+CONV_API="https://api.v1.mk/sub?target=singbox&url=" 
 UI_SECRET="123456"
 
 ensure_dirs(){
@@ -47,19 +41,23 @@ get_lan_ip(){
 }
 
 # ==============================
-# 1. 核心修复：自动生成服务脚本
+# 1. 核心修复：强制生成启动文件
 # ==============================
 ensure_init_script(){
+  # 如果启动脚本不存在，直接创建一个标准的 OpenWrt procd 脚本
   if [ ! -f "/etc/init.d/sing-box" ]; then
-    msg "⚙️ 检测到服务脚本缺失，正在自动修复..."
+    msg "⚙️ 正在修复缺失的服务文件..."
+    
+    # 找一下 sing-box 在哪
     bin_path="/usr/bin/sing-box"
     [ ! -x "$bin_path" ] && bin_path="$(command -v sing-box)"
     
     if [ -z "$bin_path" ]; then
-      msg "❌ 严重错误：找不到 sing-box 二进制文件！"
+      msg "❌ 错误：找不到 sing-box 程序！请先安装。"
       return 1
     fi
 
+    # 写入启动脚本
     cat > /etc/init.d/sing-box <<EOF
 #!/bin/sh /etc/rc.common
 USE_PROCD=1
@@ -78,12 +76,12 @@ start_service() {
 }
 EOF
     chmod +x /etc/init.d/sing-box
-    msg "✅ 服务脚本已重建"
+    msg "✅ 服务文件修复完成！"
   fi
 }
 
 # ==============================
-# 2. 智能依赖检测
+# 2. 依赖检测
 # ==============================
 check_and_install_deps(){
   if ! command -v python3 >/dev/null 2>&1; then
@@ -104,15 +102,12 @@ check_and_install_deps(){
       y|Y) 
         msg "🔄 正在安装 Sing-box..."
         opkg update && opkg install sing-box || true
-        if ! command -v sing-box >/dev/null 2>&1; then
-           msg "❌ 安装失败，请手动安装。"
-           return 1
-        fi
-        msg "✅ 安装成功！"
         ;;
       *) return 1 ;; 
     esac
   fi
+  
+  # 每次检查依赖时，都顺手检查一下启动脚本
   ensure_init_script
   return 0
 }
@@ -122,17 +117,12 @@ check_and_install_deps(){
 # ==============================
 install_ui_panel(){
   if [ ! -f "$SB_UI_DIR/index.html" ]; then
-    msg "🎨 检测到面板缺失，正在下载..."
+    msg "🎨 正在下载 Web 面板..."
     dl_url="https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
-    tmp_zip="/tmp/ui.zip"
-    if curl -L -k -o "$tmp_zip" "$dl_url"; then
-      unzip -o -q "$tmp_zip" -d /tmp/ui_extract || true
-      cp -rf /tmp/ui_extract/*/* "$SB_UI_DIR/" 2>/dev/null || true
-      rm -rf "$tmp_zip" /tmp/ui_extract
-      msg "✅ 面板安装完成！"
-    else
-      msg "❌ 面板下载失败 (网络问题)，Web 功能受限。"
-    fi
+    curl -L -k -o /tmp/ui.zip "$dl_url"
+    unzip -o -q /tmp/ui.zip -d /tmp/ui_extract || true
+    cp -rf /tmp/ui_extract/*/* "$SB_UI_DIR/" 2>/dev/null || true
+    rm -rf /tmp/ui.zip /tmp/ui_extract
   fi
 }
 
@@ -151,7 +141,7 @@ allow_firewall_ui(){
 }
 
 # ==============================
-# 4. 下载与转换 (增强版)
+# 4. 设置与下载
 # ==============================
 set_subscription(){
   echo
@@ -167,63 +157,19 @@ set_subscription(){
   fi
 }
 
-manual_import_nodes(){
-  echo
-  echo "=============================================="
-  echo "   📝 手动粘贴节点数据"
-  echo "=============================================="
-  echo "由于网络问题无法下载，请手动粘贴 Sing-box 格式的 JSON 内容。"
-  echo "获取方法：在电脑浏览器打开 'https://api.v1.mk/sub?target=singbox&url=你的订阅链接'"
-  echo "然后全选复制，粘贴到这里。"
-  echo "----------------------------------------------"
-  echo "粘贴后，请按回车，然后按 Ctrl+D 保存。"
-  echo "----------------------------------------------"
-  
-  # 使用 cat > 录入
-  cat > "$SB_NODES_FILE"
-  
-  if grep -q "outbounds" "$SB_NODES_FILE"; then
-    msg "✅ 手动导入成功！"
-    return 0
-  else
-    msg "❌ 内容格式错误，必须包含 'outbounds' 字段。"
-    return 1
-  fi
-}
-
 download_and_convert(){
   url="$1"
-  msg "🔄 正在下载并转换节点 (尝试多条线路)..."
+  msg "🔄 正在下载节点..."
   safe_url="$(echo "$url" | sed 's/:/%3A/g; s/\//%2F/g; s/?/%3F/g; s/&/%26/g; s/=/%3D/g')"
   
-  # 循环尝试 API
-  success=0
-  for api in "$API_1" "$API_2" "$API_3"; do
-    msg "   👉 尝试 API: ${api%%/sub*}..." 
-    if curl -k -sL -f --connect-timeout 10 "${api}${safe_url}" -o "$SB_NODES_FILE"; then
-      # 简单校验
-      if grep -q "outbounds" "$SB_NODES_FILE"; then
-         msg "✅ 节点下载成功！"
-         success=1
-         break
-      else
-         msg "   ⚠️ 下载内容无效，尝试下一个..."
-      fi
+  if curl -k -sL "${CONV_API}${safe_url}" -o "$SB_NODES_FILE"; then
+    if grep -q "outbounds" "$SB_NODES_FILE"; then
+      msg "✅ 节点更新成功！"
     else
-      msg "   ⚠️ 连接超时或失败，尝试下一个..."
+      msg "❌ 下载内容无效。"
     fi
-  done
-
-  if [ $success -eq 0 ]; then
-    msg "❌ 所有转换 API 均连接失败！"
-    msg "可能原因：路由器 DNS 问题、网络不通、或 API 被墙。"
-    echo
-    printf "是否尝试【手动粘贴】节点内容? (y/N): "
-    read yn
-    case "$yn" in 
-      y|Y) manual_import_nodes ;;
-      *) msg "❌ 操作已取消。";;
-    esac
+  else
+    msg "❌ 下载失败，请检查网络。"
   fi
 }
 
@@ -326,6 +272,7 @@ EOF
 # ==============================
 gw_start(){
   ensure_dirs
+  # 必须先检查依赖，这里面包含了修复 init 脚本的逻辑
   if ! check_and_install_deps; then
      msg "⚠️ 依赖错误，按回车返回..."
      read _ 
@@ -333,7 +280,6 @@ gw_start(){
   fi
   install_ui_panel
   allow_firewall_ui
-  ensure_init_script
   
   mode="$(cat "$GW_MODE_FILE" 2>/dev/null || echo "A")"
   sub_url="$(cat "$GW_SUB_URL_FILE" 2>/dev/null || echo "")"
@@ -359,6 +305,8 @@ gw_start(){
       generate_sb_config "$mode"
       
       msg "⚡ 启动服务..."
+      
+      # ⚠️ 关键修改：直接使用 service 命令或绝对路径，并捕获错误
       if /etc/init.d/sing-box restart; then
          msg "✅ 启动成功！"
          echo
@@ -368,8 +316,7 @@ gw_start(){
          printf "按回车返回..."
          read _
       else
-         msg "❌ 启动失败！日志:"
-         logread | grep sing-box | tail -n 3
+         msg "❌ 启动失败！请尝试手动运行: /etc/init.d/sing-box start"
          printf "按回车返回..."
          read _
       fi
@@ -426,13 +373,13 @@ proxy_gateway_menu(){
     status="$(get_status_icon)"
     lan_ip="$(get_lan_ip)"
     echo "=============================================="
-    echo "       🚀 网关管理 V3.4 (多线路API版)"
+    echo "       🚀 网关管理 V3.2 (启动修复版)"
     echo "=============================================="
     echo " 📊 状态: $status      🛤️ 模式: $curr_mode 线"
     [ "$status" = "🟢 运行中" ] && echo " 🌍 http://$lan_ip:9090/ui"
     echo "=============================================="
     echo " 1) 🔄 切换模式"
-    echo " 2) 🔗 设置订阅 (自动/手动)"
+    echo " 2) 🔗 设置订阅"
     echo " 3) ♻️ 更新节点"
     echo " ------------------------"
     echo " 4) 🟢 启动/重启"
