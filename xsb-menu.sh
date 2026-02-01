@@ -8,19 +8,14 @@
 #   - TUIC (sing-box)
 #   - Hysteria2 (sing-box)
 #
-# Fixes in v1.0.2:
-#   1) jq 兼容性：不再使用三元+对象字面量导致 compile error
-#   2) Reality privateKey 为空导致 xray 崩溃：改为稳健解析 + 空值校验
-#   3) Reality dest 改成 SNI:443
-#   4) HY2 输出标准 hysteria2:// 链接 + QR
-#   5) TUIC 输出 sing-box JSON(必可用) + tuic:// 分享链接(部分客户端可用)
+# Fixes in v1.3:
 # =========================================================
 
 set -euo pipefail
 trap 'echo -e "\n❌ 脚本出错：第 $LINENO 行（退出码=$?）\n    你可以把这一屏发给我定位\n" >&2' ERR
 safe_run(){ "$@" || return 1; }
 
-VERSION="1.0.2"
+VERSION="1.3"
 
 # --------- Paths ----------
 XRAY_BIN="/usr/local/bin/xray"
