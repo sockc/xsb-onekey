@@ -1,7 +1,22 @@
 #!/bin/sh
-set -eu
+# V3.2 修复版：移除 set -e 防止意外闪退
 
 msg(){ echo "[xsb-openwrt] $*" >&2; }
+
+# ==============================
+# 0. 基础设置与快捷命令
+# ==============================
+# 自动创建快捷命令 xsb
+ensure_xsb_cmd(){
+  current_script="$(readlink -f "$0")"
+  if [ ! -f "/usr/bin/xsb" ]; then
+    cat > /usr/bin/xsb <<EOF
+#!/bin/sh
+sh "$current_script"
+EOF
+    chmod +x /usr/bin/xsb
+  fi
+}
 
 # ==============================
 # 路径与变量
@@ -30,10 +45,10 @@ get_lan_ip(){
 }
 
 # ==============================
-# 0. 智能依赖与内核检测
+# 1. 智能依赖与内核检测
 # ==============================
 check_and_install_deps(){
-  # 1. 检查基础工具
+  # 1. 检查 python3
   if ! command -v python3 >/dev/null 2>&1; then
     msg "❌ 缺少 python3 (用于生成配置)。"
     printf "是否自动安装? (y/N): "
@@ -41,17 +56,17 @@ check_and_install_deps(){
     case "$yn" in y|Y) opkg update && opkg install python3-light python3-json ;; *) return 1 ;; esac
   fi
   
+  # 2. 检查 curl
   if ! command -v curl >/dev/null 2>&1; then
-    msg "❌ 缺少 curl (用于下载)。"
     opkg update && opkg install curl
   fi
 
+  # 3. 检查 unzip
   if ! command -v unzip >/dev/null 2>&1; then
-    # 下载UI需要解压
     opkg update && opkg install unzip
   fi
 
-  # 2. 检查 Sing-box 内核
+  # 4. 检查 Sing-box 内核
   if ! command -v sing-box >/dev/null 2>&1; then
     msg "❌ 未检测到 Sing-box 内核！"
     printf "是否自动安装 (opkg)? (y/N): "
@@ -59,9 +74,9 @@ check_and_install_deps(){
     case "$yn" in 
       y|Y) 
         msg "🔄 正在安装 Sing-box..."
-        opkg update && opkg install sing-box
+        opkg update && opkg install sing-box || true
         if ! command -v sing-box >/dev/null 2>&1; then
-           msg "❌ 安装失败，请尝试手动安装或更换软件源。"
+           msg "❌ 安装失败，请尝试手动安装。"
            return 1
         fi
         msg "✅ Sing-box 安装成功！"
@@ -76,32 +91,28 @@ check_and_install_deps(){
 }
 
 # ==============================
-# 1. 自动安装 Web UI 面板
+# 2. 自动安装 Web UI 面板
 # ==============================
 install_ui_panel(){
-  # 如果 index.html 不存在，说明没装好
   if [ ! -f "$SB_UI_DIR/index.html" ]; then
     msg "🎨 检测到 Web 面板缺失，正在自动下载..."
-    
     dl_url="https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
     tmp_zip="/tmp/ui.zip"
     
-    # 尝试下载
     if curl -L -k -o "$tmp_zip" "$dl_url"; then
       msg "📦 下载完成，正在解压..."
-      unzip -o -q "$tmp_zip" -d /tmp/ui_extract
-      cp -rf /tmp/ui_extract/*/* "$SB_UI_DIR/"
+      unzip -o -q "$tmp_zip" -d /tmp/ui_extract || true
+      cp -rf /tmp/ui_extract/*/* "$SB_UI_DIR/" 2>/dev/null || true
       rm -rf "$tmp_zip" /tmp/ui_extract
       msg "✅ Web 面板安装完成！"
     else
-      msg "❌ 面板下载失败，请检查网络 (Github 连接问题)。"
-      msg "   暂不影响代理功能，但无法使用 Web 选节点。"
+      msg "❌ 面板下载失败，请检查网络。"
     fi
   fi
 }
 
 # ==============================
-# 2. 防火墙放行 (Web UI)
+# 3. 防火墙放行 (Web UI)
 # ==============================
 allow_firewall_ui(){
   if ! uci show firewall 2>/dev/null | grep -q "Allow-SingBox-UI"; then
@@ -113,12 +124,13 @@ allow_firewall_ui(){
     uci set firewall.@rule[-1].dest_port='9090'
     uci set firewall.@rule[-1].target='ACCEPT'
     uci commit firewall
-    /etc/init.d/firewall restart >/dev/null 2>&1
+    /etc/init.d/firewall restart >/dev/null 2>&1 || true
+    msg "✅ 防火墙规则已添加"
   fi
 }
 
 # ==============================
-# 3. 设置订阅链接
+# 4. 设置订阅链接
 # ==============================
 set_subscription(){
   echo
@@ -143,23 +155,24 @@ download_and_convert(){
   safe_url="$(echo "$url" | sed 's/:/%3A/g; s/\//%2F/g; s/?/%3F/g; s/&/%26/g; s/=/%3D/g')"
   full_api="${CONV_API}${safe_url}"
   
-  if curl -k -sL "$full_api" -o "$SB_NODES_FILE"; then
+  # 使用 -f 选项，如果 HTTP 错误则失败
+  if curl -k -sL -f "$full_api" -o "$SB_NODES_FILE"; then
     if grep -q "outbounds" "$SB_NODES_FILE"; then
       msg "✅ 节点更新成功！"
     else
-      msg "❌ 转换失败，内容无效。"
+      msg "❌ 转换失败：内容格式无效。"
     fi
   else
-    msg "❌ 下载失败，请检查网络。"
+    msg "❌ 下载失败，请检查网络或订阅链接是否正确。"
   fi
 }
 
 # ==============================
-# 4. Python 配置生成器
+# 5. Python 配置生成器
 # ==============================
 generate_sb_config(){
   mode="$1"
-  ui_path="$SB_UI_DIR" # 使用绝对路径
+  ui_path="$SB_UI_DIR"
   
   cat <<EOF > /tmp/gen_sb.py
 import json
@@ -258,13 +271,17 @@ EOF
 }
 
 # ==============================
-# 5. 启动/停止逻辑
+# 6. 启动/停止逻辑
 # ==============================
 gw_start(){
   ensure_dirs
   
   # 1. 检查内核与依赖
-  check_and_install_deps || return 1
+  if ! check_and_install_deps; then
+     msg "⚠️ 依赖检查未通过，按回车返回..."
+     read _ 
+     return 1
+  fi
   
   # 2. 检查 UI
   install_ui_panel
@@ -272,39 +289,50 @@ gw_start(){
   
   mode="$(cat "$GW_MODE_FILE" 2>/dev/null || echo "A")"
   sub_url="$(cat "$GW_SUB_URL_FILE" 2>/dev/null || echo "")"
+  # 去除空格
+  mode="$(echo "$mode" | tr -d '[:space:]')" 
   
   echo
   msg "🚀 正在启动网关 (模式: $mode)..."
   
-  # 停止旧服务
   gw_stop_silent
   
   case "$mode" in
     A|B)
       if [ -z "$sub_url" ]; then
-        msg "⚠️ 警告：未设置订阅链接！请先设置订阅。"
+        msg "⚠️ 警告：未设置订阅链接！请先选 2) 设置订阅。"
+        printf "按回车键返回菜单..."
+        read _
         return 1
-      elif [ ! -f "$SB_NODES_FILE" ]; then
-        msg "⚠️ 节点文件不存在，正在下载..."
+      fi
+      
+      if [ ! -f "$SB_NODES_FILE" ]; then
+        msg "📥 节点文件不存在，正在下载..."
         download_and_convert "$sub_url"
       fi
       
-      msg "   - 生成配置文件..."
+      msg "🔨 正在生成配置文件..."
       generate_sb_config "$mode"
       
-      msg "   - 启动 Sing-box 服务..."
+      msg "⚡ 正在启动 Sing-box 服务..."
       if /etc/init.d/sing-box start; then
          msg "✅ 启动成功！"
          echo
          msg "🌐 Web 面板地址: http://$(get_lan_ip):9090/ui"
          msg "🔑 访问密码: $UI_SECRET"
          echo
+         printf "按回车键返回菜单..."
+         read _
       else
-         msg "❌ 启动失败，请检查日志 (logread -e sing-box)"
+         msg "❌ 启动失败！请检查日志 (logread -e sing-box)"
+         printf "按回车键返回菜单..."
+         read _
       fi
       ;;
     C)
-      msg "ℹ️ C线目前闲置，无动作。"
+      msg "ℹ️ C线 (Mihomo) 目前闲置。"
+      printf "按回车键返回..."
+      read _
       ;;
   esac
 }
@@ -313,11 +341,13 @@ gw_stop(){
   msg "🛑 正在停止网关..."
   gw_stop_silent
   msg "✅ 网关已关闭，恢复直连。"
+  printf "按回车键返回..."
+  read _
 }
 
 gw_stop_silent(){
-  [ -x /etc/init.d/sing-box ] && /etc/init.d/sing-box stop >/dev/null 2>&1
-  [ -x /etc/init.d/mihomo ] && /etc/init.d/mihomo stop >/dev/null 2>&1
+  [ -x /etc/init.d/sing-box ] && /etc/init.d/sing-box stop >/dev/null 2>&1 || true
+  [ -x /etc/init.d/mihomo ] && /etc/init.d/mihomo stop >/dev/null 2>&1 || true
 }
 
 get_status_icon(){
@@ -329,7 +359,7 @@ get_status_icon(){
 }
 
 # ==============================
-# 6. 菜单逻辑
+# 7. 菜单逻辑
 # ==============================
 set_route_mode(){
   echo
@@ -352,14 +382,16 @@ set_route_mode(){
 
 proxy_gateway_menu(){
   ensure_dirs
+  ensure_xsb_cmd
+  
   while true; do
+    clear 
     curr_mode="$(cat "$GW_MODE_FILE" 2>/dev/null || echo "A")"
     status="$(get_status_icon)"
     lan_ip="$(get_lan_ip)"
     
-    echo
     echo "=============================================="
-    echo "       🚀 网关管理中心 V3.0 (增强版)"
+    echo "       🚀 网关管理中心 V3.2 (修复版)"
     echo "=============================================="
     echo " 📊 状态: $status      🛤️ 模式: $curr_mode 线"
     if [ "$status" = "🟢 运行中" ]; then
@@ -371,10 +403,10 @@ proxy_gateway_menu(){
     echo " 2) 🔗 设置订阅 (自动转换)"
     echo " 3) ♻️ 更新节点 (重新下载)"
     echo " ------------------------"
-    echo " 4) 🟢 开启 / 重启网关 (一键启动)"
-    echo " 5) 🔴 停止网关 (恢复直连)"
+    echo " 4) 🟢 开启 / 重启网关"
+    echo " 5) 🔴 停止网关"
     echo " ------------------------"
-    echo " 0) 🔙 返回上一级"
+    echo " 0) 🔙 退出"
     echo
     printf " 请选择操作: "
     read c
@@ -384,8 +416,11 @@ proxy_gateway_menu(){
       3) download_and_convert "$(cat "$GW_SUB_URL_FILE" 2>/dev/null)" && gw_start ;;
       4) gw_start ;;
       5) gw_stop ;;
-      0) return 0 ;;
+      0) exit 0 ;;
       *) echo "无效选项" ;;
     esac
   done
 }
+
+# 脚本入口
+proxy_gateway_menu
