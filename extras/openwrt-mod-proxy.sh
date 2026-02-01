@@ -14,9 +14,7 @@ GW_DEFAULT_SLOT_FILE="$GW_DIR/default_slot" # e.g. HK
 GW_IMPORTED_FILE="$GW_DIR/imported_links.txt"
 GW_MODE_FILE="$GW_DIR/route_mode"           # Stores: A, B, or C
 
-# Template Paths (Based on your request)
-# Assuming these are located inside /etc/xsb/ or a similar root. 
-# Adjust BASE_DIR if xsb-onekey is located elsewhere.
+# 模板路径定义 (请确保这些文件实际存在)
 BASE_DIR="/etc/xsb" 
 TPL_A_BASIC="$BASE_DIR/xsb-onekey/config/template_basic.yaml"
 TPL_B_LIGHT="$BASE_DIR/xsb-onekey/config/template_light.yaml"
@@ -26,7 +24,7 @@ ensure_gateway_dirs(){
   mkdir -p "$GW_DIR" "$GW_NODES_DIR" "$GW_META_DIR" >/dev/null 2>&1 || true
   [ -f "$GW_SLOTS_FILE" ] || : > "$GW_SLOTS_FILE"
   [ -f "$GW_IMPORTED_FILE" ] || : > "$GW_IMPORTED_FILE"
-  # Default to Mode B if not set
+  # 默认模式设为 B
   [ -f "$GW_MODE_FILE" ] || echo "B" > "$GW_MODE_FILE"
 }
 
@@ -448,6 +446,17 @@ choose_slot(){
 }
 
 # ==============================
+# Placeholder for Config Rebuild
+# ==============================
+# 确保在外部脚本没有定义 gw_rebuild_all 时，这里有个占位符，防止报错
+if ! command -v gw_rebuild_all >/dev/null 2>&1; then
+  gw_rebuild_all(){
+     msg "ℹ️ 配置已保存。请运行您的构建脚本以应用更改（或重启服务）。"
+     msg "当前生效模板: $(get_active_template)"
+  }
+fi
+
+# ==============================
 # Mode Management (A/B/C)
 # ==============================
 set_route_mode(){
@@ -479,10 +488,7 @@ set_route_mode(){
   esac
 
   # Attempt rebuild if command exists
-  if command -v gw_rebuild_all >/dev/null 2>&1; then
-    msg "正在应用新模式..."
-    gw_rebuild_all || true
-  fi
+  gw_rebuild_all || true
 }
 
 # Helper to get current template file path (Called by config generator)
@@ -600,7 +606,12 @@ exits_slots_menu(){
   done
 }
 
-exits_menu(){
+# ==============================
+# Main Entry Point (Renamed)
+# ==============================
+# IMPORTANT: Renamed from exits_menu to proxy_gateway_menu
+# to match the main script's expectation.
+proxy_gateway_menu(){
   ensure_gateway_dirs
   while true; do
     curr_m="$(cat "$GW_MODE_FILE" 2>/dev/null || echo "B")"
