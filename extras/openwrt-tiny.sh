@@ -89,7 +89,7 @@ gw_status_badge(){
 # ==============================
 # Repo / module loader
 # ==============================
-REPO="${REPO:-sockc/1234xsb-onekey-}"
+REPO="${REPO:-sockc/xsb-onekey}"
 REF="${REF:-main}"
 MIRROR="${MIRROR:-raw}"
 
@@ -114,7 +114,7 @@ mod_load(){
   mod="$1"
   ensure_mod_dirs
 
-  repo="${REPO:-sockc/1234xsb-onekey-}"
+  repo="${REPO:-sockc/xsb-onekey}"
   ref="${REF:-main}"
   url="https://raw.githubusercontent.com/${repo}/${ref}/extras/$mod"
 
